@@ -1,77 +1,38 @@
-CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -Wpedantic -Wstrict-aliasing  -DGIT_VERSION=\"$(GIT_VERSION)\"
+PREFIX      ?= /usr/local
+CC          ?= cc
 
-SRC      = src/nwm.cpp src/bar.cpp src/tiling.cpp src/systray.cpp src/animations.cpp
-OBJ      = src/nwm.o src/bar.o src/tiling.o src/systray.o src/animations.o
-DEPS     = src/nwm.hpp src/bar.hpp src/tiling.hpp src/config.hpp src/systray.hpp src/animations.hpp
+X11CFLAGS   := $(shell pkg-config --cflags x11 xinerama 2>/dev/null)
+X11LIBS     := $(shell pkg-config --libs x11 xinerama 2>/dev/null)
+X11CFLAGS   ?= -I/usr/include
+X11LIBS     ?= -L/usr/lib -lX11 -lXinerama
 
-LDFLAGS  = $(shell pkg-config --cflags freetype2 fontconfig xft x11 xrandr xinerama)
-LDLIBS   = $(shell pkg-config --libs freetype2 fontconfig xft x11 xrandr xinerama) -lXrender -lm
+CFLAGS      += -O2 -Wall -Wextra $(X11CFLAGS)
+LDFLAGS     += $(X11LIBS)
 
-GIT_VERSION = "$(shell git rev-parse HEAD)"
+all: dswm dswm-session
 
-PREFIX   ?= /usr/local
-BINDIR   ?= $(PREFIX)/bin
-XSESSIONSDIR ?= $(PREFIX)/share/xsessions
+dswm: dswm.c dswm.h
+	$(CC) $(CFLAGS) -o $@ dswm.c $(LDFLAGS)
 
-MAJOR    = 1
-MINOR    = 1
-PATCH    = 1
-
-.PHONY: copy all install clean uninstall
-
-all: copy nwm
-copy:
-	@if [ ! -f src/config.hpp ]; then \
-		cp src/default-config.hpp src/config.hpp; \
-		echo "Copied default-config.hpp to config.hpp"; \
-	else \
-		echo "config.hpp already exists, skipping"; \
-	fi
-
-version: src/nwm.hpp
-	@awk -v major="$(MAJOR)" -v minor="$(MINOR)" -v patch="$(PATCH)" ' \
-		BEGIN { in_version_block = 0 } \
-		/^#ifndef NWM_HPP/ { \
-			print; \
-			getline; \
-			print; \
-			print ""; \
-			print "#define MAJOR_VERSION " major; \
-			print "#define MINOR_VERSION " minor; \
-			print "#define PATCH_VERSION " patch; \
-			print ""; \
-			in_version_block = 1; \
-			next \
-		} \
-		/^#define (MAJOR|MINOR|PATCH)_VERSION/ { next } \
-		in_version_block && /^$$/ && ++empty_count == 2 { in_version_block = 0; next } \
-		in_version_block && /^$$/ { next } \
-		{ print; in_version_block = 0 } \
-	' src/nwm.hpp > temp_nwm.hpp && mv temp_nwm.hpp src/nwm.hpp
-
-src/%.o: src/%.cpp $(DEPS) version
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -c $< -o $@
-
-nwm: $(OBJ)
-	$(CXX) $(CXXFLAGS) $(OBJ) -o nwm $(LDLIBS)
-
-extension: zoomer
-
-zoomer:
-	$(MAKE) -C src/extension/zoomer
-
-install: nwm
-	mkdir -p $(BINDIR)
-	mkdir -p $(XSESSIONSDIR)
-	install -Dm755 nwm $(BINDIR)/nwm
-	install -Dm644 nwm.desktop $(XSESSIONSDIR)/nwm.desktop
-	@echo "Installed nwm to $(BINDIR)"
-	@echo "Installed nwm.desktop to $(XSESSIONSDIR)"
+dswm-session: dswm-session.c
+	$(CC) $(CFLAGS) -o $@ dswm-session.c $(LDFLAGS)
 
 clean:
-	$(RM) nwm $(OBJ)
+	rm -rf dswm
+	rm -f dswm-session
+	rm -rf pkg/ src/
+	rm -f dswm-git-*.pkg.tar.zst
+
+install: all
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 dswm $(DESTDIR)$(PREFIX)/bin/dswm
+	install -m 755 dswm-session $(DESTDIR)$(PREFIX)/bin/dswm-session
+	install -d $(DESTDIR)$(PREFIX)/share/xsessions
+	install -m 644 dswm.desktop $(DESTDIR)$(PREFIX)/share/xsessions/dswm.desktop
 
 uninstall:
-	$(RM) $(BINDIR)/nwm temp.gen
-	$(RM) $(XSESSIONSDIR)/nwm.desktop
-	@echo "Uninstalled nwm"
+	rm -f $(DESTDIR)$(PREFIX)/bin/dswm
+	rm -f $(DESTDIR)$(PREFIX)/bin/dswm-session
+	rm -f $(DESTDIR)$(PREFIX)/share/xsessions/dswm.desktop
+
+.PHONY: all clean install uninstall

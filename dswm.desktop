@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=NWM
+Name=DSWM
 Comment=A scrollable tiling window manager
-Exec=nwm
+Exec=dswm-session
 Type=Application
-DesktopNames=NWM
+DesktopNames=DSWM
