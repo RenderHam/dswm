@@ -86,8 +86,8 @@ curmon(void)
 
 /* ---- tiling: collect tiled windows from current workspace ---- */
 
-static int
-collect_tiled(Workspace *ws, ManagedWindow **out, int maxout, int monid)
+int
+collect_tiled(const Workspace *ws, ManagedWindow **out, int maxout, int monid)
 {
     int i, n = 0;
     for (i = 0; i < ws->nwin && n < maxout; i++)
@@ -99,8 +99,8 @@ collect_tiled(Workspace *ws, ManagedWindow **out, int maxout, int monid)
 
 /* ---- bar strut support ---- */
 
-static void
-compute_struts(Monitor *mon, int *strut_top, int *strut_bottom,
+void
+compute_struts(const Monitor *mon, int *strut_top, int *strut_bottom,
                int *strut_left, int *strut_right)
 {
     Workspace *ws = curws();
@@ -140,7 +140,7 @@ compute_struts(Monitor *mon, int *strut_top, int *strut_bottom,
 
 /* ---- tiling: horizontal scroll layout ---- */
 
-void
+static void
 tile_horizontal(void)
 {
     Workspace *ws = curws();
@@ -219,7 +219,7 @@ tile_horizontal(void)
 
 /* ---- tiling: master-stack layout ---- */
 
-void
+static void
 tile_windows(void)
 {
     Workspace *ws = curws();
@@ -310,7 +310,7 @@ tile_windows(void)
 
 /* ---- tiling: resize master factor ---- */
 
-void
+static void
 resize_master(void *arg)
 {
     Workspace *ws = curws();
@@ -344,7 +344,7 @@ resize_master(void *arg)
 
 /* ---- tiling: monitor focus ---- */
 
-void
+static void
 focus_monitor(void *arg)
 {
     int mon_idx = *(int *)arg;
@@ -358,7 +358,7 @@ focus_monitor(void *arg)
 
 /* ---- tiling: set scroll_visible ---- */
 
-void
+static void
 set_scroll_visible(void *arg)
 {
     int val = *(int *)arg;
@@ -374,7 +374,7 @@ set_scroll_visible(void *arg)
 
 /* ---- tiling: scroll left/right ---- */
 
-void
+static void
 move_horizontal(int forward)
 {
     Monitor *mon = curmon();
@@ -411,13 +411,13 @@ move_horizontal(int forward)
     tile_horizontal();
 }
 
-void
+static void
 scroll_left(void)
 {
     move_horizontal(0);
 }
 
-void
+static void
 scroll_right(void)
 {
     move_horizontal(1);
@@ -425,7 +425,7 @@ scroll_right(void)
 
 /* ---- tiling: toggle layout mode ---- */
 
-void
+static void
 toggle_layout(void)
 {
     Monitor *mon = curmon();
@@ -445,7 +445,7 @@ toggle_layout(void)
 
 /* ---- tiling: swap windows ---- */
 
-static void
+void
 swap_impl(int delta)
 {
     Workspace *ws = curws();
@@ -478,13 +478,13 @@ swap_impl(int delta)
     ws->focused = &ws->wins[swap_idx];
 }
 
-void
+static void
 swap_next(void)
 {
     swap_impl(1);
 }
 
-void
+static void
 swap_prev(void)
 {
     swap_impl(-1);
@@ -492,7 +492,7 @@ swap_prev(void)
 
 /* ---- tiling: increment/decrement scroll_visible ---- */
 
-void
+static void
 increment_scroll_visible(void)
 {
     Monitor *mon = curmon();
@@ -506,7 +506,7 @@ increment_scroll_visible(void)
         tile_horizontal();
 }
 
-void
+static void
 decrement_scroll_visible(void)
 {
     Monitor *mon = curmon();
@@ -522,7 +522,7 @@ decrement_scroll_visible(void)
 
 /* ---- workspace management ---- */
 
-void
+static void
 switch_workspace(void *arg)
 {
     int idx = (int)(long)arg;
@@ -534,7 +534,7 @@ switch_workspace(void *arg)
         tile_windows();
 }
 
-void
+static void
 move_to_workspace(void *arg)
 {
     int idx = (int)(long)arg;
@@ -583,7 +583,7 @@ move_to_workspace(void *arg)
 
 /* ---- window management ---- */
 
-void
+static void
 manage_window(Window w)
 {
     Workspace *ws = curws();
@@ -637,7 +637,7 @@ manage_window(Window w)
         tile_windows();
 }
 
-void
+static void
 unmanage_window(Window w)
 {
     Workspace *ws = curws();
@@ -662,7 +662,7 @@ unmanage_window(Window w)
 
 /* ---- focus ---- */
 
-void
+static void
 focus_next(void)
 {
     Workspace *ws = curws();
@@ -683,7 +683,7 @@ focus_next(void)
     XRaiseWindow(dpy, ws->focused->window);
 }
 
-void
+static void
 focus_prev(void)
 {
     Workspace *ws = curws();
@@ -706,7 +706,7 @@ focus_prev(void)
 
 /* ---- close/quit ---- */
 
-void
+static void
 close_window(void)
 {
     Workspace *ws = curws();
@@ -725,7 +725,7 @@ close_window(void)
     XSendEvent(dpy, ws->focused->window, False, NoEventMask, &ev);
 }
 
-void
+static void
 quit_wm(void)
 {
     running = 0;
@@ -733,7 +733,7 @@ quit_wm(void)
 
 /* ---- toggle states ---- */
 
-void
+static void
 toggle_gap(void)
 {
     /* GAP_OUTER/GAP_INNER are compile-time; toggle needs runtime state.
@@ -741,7 +741,7 @@ toggle_gap(void)
        to make gaps toggleable without recompiling. */
 }
 
-void
+static void
 toggle_fullscreen(void)
 {
     Workspace *ws = curws();
@@ -797,7 +797,7 @@ toggle_fullscreen(void)
     XFlush(dpy);
 }
 
-void
+static void
 toggle_float(void)
 {
     Workspace *ws = curws();
@@ -823,7 +823,7 @@ toggle_float(void)
 
 /* ---- spawn ---- */
 
-void
+static void
 spawn(void *arg)
 {
     const char **cmd = (const char **)arg;
@@ -838,7 +838,7 @@ spawn(void *arg)
 
 /* ---- EWMH ---- */
 
-static void
+void
 setup_ewmh(void)
 {
     Atom net_supported, net_number_of_desktops, net_current_desktop,
@@ -869,7 +869,7 @@ setup_ewmh(void)
 
 /* ---- key grabbing ---- */
 
-static void
+void
 grab_keys(void)
 {
     unsigned int i, j;
@@ -889,7 +889,7 @@ grab_keys(void)
 
 /* ---- error handler (ignore X errors) ---- */
 
-static int
+int
 xerror(Display *d, XErrorEvent *ee)
 {
     (void)d;
@@ -899,25 +899,25 @@ xerror(Display *d, XErrorEvent *ee)
 
 /* ---- event handlers ---- */
 
-static void
+void
 handle_map_request(XMapRequestEvent *e)
 {
     manage_window(e->window);
 }
 
-static void
+void
 handle_destroy_notify(XDestroyWindowEvent *e)
 {
     unmanage_window(e->window);
 }
 
-static void
+void
 handle_unmap_notify(XUnmapEvent *e)
 {
     unmanage_window(e->window);
 }
 
-static void
+void
 handle_configure_request(XConfigureRequestEvent *e)
 {
     XWindowChanges wc;
@@ -931,7 +931,7 @@ handle_configure_request(XConfigureRequestEvent *e)
     XConfigureWindow(dpy, e->window, e->value_mask, &wc);
 }
 
-static void
+void
 handle_enter_notify(XCrossingEvent *e)
 {
     Workspace *ws = curws();
@@ -949,7 +949,7 @@ handle_enter_notify(XCrossingEvent *e)
     }
 }
 
-static void
+void
 handle_key_press(XKeyEvent *e)
 {
     KeySym keysym = XLookupKeysym(e, 0);
@@ -985,7 +985,7 @@ handle_key_press(XKeyEvent *e)
     }
 }
 
-static void
+void
 handle_button_press(XButtonEvent *e)
 {
     Workspace *ws = curws();
@@ -1003,7 +1003,7 @@ handle_button_press(XButtonEvent *e)
 
 /* ---- monitor init ---- */
 
-static void
+void
 monitors_init(void)
 {
     /* try Xinerama first */
@@ -1060,7 +1060,7 @@ monitors_init(void)
 
 /* ---- init / run / cleanup ---- */
 
-static void
+void
 init(void)
 {
     XSetErrorHandler(xerror);
@@ -1092,7 +1092,7 @@ init(void)
     signal(SIGCHLD, SIG_IGN);
 }
 
-static void
+void
 run(void)
 {
     XEvent ev;
@@ -1111,7 +1111,7 @@ run(void)
     }
 }
 
-static void
+void
 cleanup(void)
 {
     int i;
