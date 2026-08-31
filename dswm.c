@@ -539,34 +539,39 @@ move_to_workspace(void *arg)
 {
     int idx = (int)(long)arg;
     Workspace *ws = curws();
-    ManagedWindow *f;
-    int i;
+    ManagedWindow win;
+    int i, found = 0;
 
     if (idx < 0 || idx >= NUM_WORKSPACES) return;
     if (idx == cur_ws) return;
+    if (!ws->focused) return;
 
-    f = ws->focused;
-    if (!f) return;
+    /* save data before memmove invalidates pointer */
+    win = *ws->focused;
 
     /* remove from current workspace */
     for (i = 0; i < ws->nwin; i++) {
-        if (&ws->wins[i] == f) {
+        if (ws->wins[i].window == win.window) {
             memmove(&ws->wins[i], &ws->wins[i + 1],
                     (ws->nwin - i - 1) * sizeof(ManagedWindow));
             ws->nwin--;
+            found = 1;
             break;
         }
     }
+    if (!found) return;
 
     /* add to target workspace */
     Workspace *target = &spaces[idx];
     if (target->nwin >= target->cap) {
-        target->cap = target->cap ? target->cap * 2 : 16;
-        target->wins = realloc(target->wins, target->cap * sizeof(ManagedWindow));
-        if (!target->wins) err(1, "realloc");
+        int newcap = target->cap ? target->cap * 2 : INITIAL_CAP;
+        ManagedWindow *tmp = realloc(target->wins, newcap * sizeof(ManagedWindow));
+        if (!tmp) { free(target->wins); target->wins = NULL; target->cap = 0; err(1, "realloc"); }
+        target->wins = tmp;
+        target->cap = newcap;
     }
-    f->workspace = idx;
-    target->wins[target->nwin++] = *f;
+    win.workspace = idx;
+    target->wins[target->nwin++] = win;
     target->focused = &target->wins[target->nwin - 1];
 
     ws->focused = NULL;
@@ -583,7 +588,9 @@ manage_window(Window w)
 {
     Workspace *ws = curws();
     XWindowAttributes wa;
+    XClassHint ch = { NULL, NULL };
     ManagedWindow mw;
+    int i;
 
     if (!XGetWindowAttributes(dpy, w, &wa)) return;
     if (wa.override_redirect) return;
@@ -599,10 +606,24 @@ manage_window(Window w)
     mw.is_floating = 0;
     mw.is_fullscreen = 0;
 
+    /* apply window rules */
+    if (XGetClassHint(dpy, w, &ch)) {
+        for (i = 0; i < (int)NELEM(rules); i++) {
+            if (ch.res_class && strcmp(ch.res_class, rules[i].wm_class) == 0) {
+                mw.is_floating = rules[i].is_floating;
+                break;
+            }
+        }
+        if (ch.res_class) XFree(ch.res_class);
+        if (ch.res_name) XFree(ch.res_name);
+    }
+
     if (ws->nwin >= ws->cap) {
-        ws->cap = ws->cap ? ws->cap * 2 : 16;
-        ws->wins = realloc(ws->wins, ws->cap * sizeof(ManagedWindow));
-        if (!ws->wins) err(1, "realloc");
+        int newcap = ws->cap ? ws->cap * 2 : INITIAL_CAP;
+        ManagedWindow *tmp = realloc(ws->wins, newcap * sizeof(ManagedWindow));
+        if (!tmp) { free(ws->wins); ws->wins = NULL; ws->cap = 0; err(1, "realloc"); }
+        ws->wins = tmp;
+        ws->cap = newcap;
     }
     ws->wins[ws->nwin++] = mw;
     ws->focused = &ws->wins[ws->nwin - 1];

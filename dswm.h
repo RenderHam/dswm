@@ -14,17 +14,21 @@
 #define BORDER_COLOR       0x181818
 #define FOCUS_COLOR        0x005577
 
-#define GAP_OUTER          0       /* px gap between windows and screen edges */
-#define GAP_INNER          0       /* px gap between adjacent tiled windows (per side) */
+#define GAP_OUTER          10       /* px gap between windows and screen edges */
+#define GAP_INNER          10       /* px gap between adjacent tiled windows (per side) */
 
 #define SCROLL_WINDOWS_VISIBLE 2
 #define SCROLL_STEP        550
 #define RESIZE_STEP        60
 
 #define BAR_POSITION       0       /* 0 = top, 1 = bottom */
-#define BAR_HEIGHT         25
+#define BAR_HEIGHT         0
 
 #define USE_XINERAMA       1
+
+#define INITIAL_CAP        16
+#define MAX_MONS           8
+#define MAX_TILED          256
 
 /* modifier keys */
 #define MODKEY             Mod4Mask
@@ -32,12 +36,12 @@
 
 /* window rules */
 typedef struct {
-    const char *class;
-    int isfloat;
+    const char *wm_class;
+    int is_floating;
 } Rule;
 
 static Rule rules[] __attribute__((unused)) = {
-    /* class name           isfloat */
+    /* class name           floating */
     { "pavucontrol",        1 },
     { "rofi",               1 },
     { "steam",              1 },
@@ -58,13 +62,13 @@ enum {
     SWITCH_WORKSPACE, MOVE_TO_WORKSPACE,
 };
 
-typedef union  { int i; void *v; } Arg;
+typedef union { int i; void *v; } Arg;
 typedef struct { unsigned int mod; KeySym sym; int act; Arg arg; } Key;
 
 /* shell commands */
-static const char *termcmd[] __attribute__((unused))  = { "kitty",      NULL };
-static const char *menucmd[] __attribute__((unused))  = { "dmenu_run",  NULL };
-static const char *browcmd[] __attribute__((unused))  = { "firefox",    NULL };
+static const char *termcmd[] __attribute__((unused))   = { "alacritty",  NULL };
+static const char *menucmd[] __attribute__((unused))   = { "rofi",       NULL };
+static const char *browsercmd[] __attribute__((unused)) = { "firefox",    NULL };
 
 static int ws0 __attribute__((unused)) = 0;
 static int ws1 __attribute__((unused)) = 1;
@@ -94,11 +98,11 @@ static Key keys[] __attribute__((unused)) = {
     /* launch */
     { MODKEY,           XK_Return, SPAWN,          { .v = termcmd  } },
     { MODKEY,           XK_d,      SPAWN,          { .v = menucmd  } },
-    { MODKEY,           XK_b,      SPAWN,          { .v = browcmd  } },
+    { MODKEY,           XK_b,      SPAWN,          { .v = browsercmd } },
 
     /* wm control */
-    { MODKEY,           XK_q,      CLOSE,          { 0 } },
-    { MODKEY|SHTKEY,    XK_q,      QUIT,           { 0 } },
+    { MODKEY,           XK_w,      CLOSE,          { 0 } },
+    { MODKEY|SHTKEY,    XK_w,      QUIT,           { 0 } },
 
     /* focus cycling */
     { MODKEY,           XK_j,      FOCUS_NEXT,     { 0 } },
