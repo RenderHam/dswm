@@ -11,17 +11,17 @@
 #define NUM_WORKSPACES     9
 
 #define BORDER_WIDTH       3
-#define BORDER_COLOR       0x181818
+#define BORDER_COLOR       0xffffff
 #define FOCUS_COLOR        0x005577
 
-#define GAP_OUTER          10       /* px gap between windows and screen edges */
-#define GAP_INNER          10       /* px gap between adjacent tiled windows (per side) */
+#define GAP_OUTER          10
+#define GAP_INNER          10
 
 #define SCROLL_WINDOWS_VISIBLE 2
 #define SCROLL_STEP        550
 #define RESIZE_STEP        60
 
-#define BAR_POSITION       0       /* 0 = top, 1 = bottom */
+#define BAR_POSITION       0
 #define BAR_HEIGHT         0
 
 #define USE_XINERAMA       1
@@ -38,9 +38,43 @@
 #define MIN_SCROLL_VIS     1
 #define MAX_SCROLL_VIS     10
 
-/* modifier keys */
 #define MODKEY             Mod4Mask
 #define SHTKEY             ShiftMask
+
+/* data structures */
+typedef struct ManagedWindow ManagedWindow;
+struct ManagedWindow {
+    Window window;
+    int x, y, width, height;
+    int is_floating;
+    int is_focused;
+    int is_fullscreen;
+    int workspace;
+    int monitor;
+    int pre_fs_x, pre_fs_y;
+    int pre_fs_width, pre_fs_height;
+    int pre_fs_floating;
+};
+
+typedef struct Monitor Monitor;
+struct Monitor {
+    int id;
+    int x, y;
+    int width, height;
+    int current_workspace;
+    float master_factor;
+    int horizontal_mode;
+    int scroll_windows_visible;
+};
+
+typedef struct Workspace Workspace;
+struct Workspace {
+    ManagedWindow *wins;
+    int nwin;
+    int cap;
+    ManagedWindow *focused;
+    int scroll_offset;
+};
 
 /* window rules */
 typedef struct {
@@ -49,7 +83,6 @@ typedef struct {
 } Rule;
 
 static Rule rules[] __attribute__((unused)) = {
-    /* class name           floating */
     { "pavucontrol",        1 },
     { "rofi",               1 },
     { "steam",              1 },
@@ -139,5 +172,62 @@ static Key keys[] __attribute__((unused)) = {
     /* workspaces */
     WS(1), WS(2), WS(3), WS(4), WS(5), WS(6), WS(7), WS(8), WS(9),
 };
+
+/* extern globals */
+extern Display *dpy;
+extern Window root;
+extern int screen;
+extern int scrw, scrh;
+extern int running;
+extern int cur_ws;
+extern Monitor mons[];
+extern int nmons;
+extern Workspace spaces[];
+
+/* layout.c */
+void tile(void);
+void resize_master(void *arg);
+void move_horizontal(int forward);
+void toggle_layout(void);
+void swap_next(void);
+void swap_prev(void);
+void adjust_scroll_visible(int delta);
+
+/* workspace.c */
+void show_workspace(int idx);
+void switch_workspace(void *arg);
+void move_to_workspace(void *arg);
+void manage_window(Window w);
+void unmanage_window(Window w);
+void focus_next(void);
+void focus_prev(void);
+void focus_monitor(void *arg);
+void set_scroll_visible(void *arg);
+void close_window(void);
+void quit_wm(void);
+void toggle_fullscreen(void);
+void toggle_float(void);
+
+/* events.c */
+void handle_map_request(XMapRequestEvent *e);
+void handle_destroy_notify(XDestroyWindowEvent *e);
+void handle_unmap_notify(XUnmapEvent *e);
+void handle_configure_request(XConfigureRequestEvent *e);
+void handle_enter_notify(XCrossingEvent *e);
+void handle_key_press(XKeyEvent *e);
+void handle_button_press(XButtonEvent *e);
+
+/* ewmh.c */
+void setup_ewmh(void);
+void update_ewmh_current_desktop(void);
+
+/* util.c */
+void grab_keys(void);
+int xerror(Display *d, XErrorEvent *ee);
+void spawn(void *arg);
+
+/* dswm.c */
+Workspace *curws(void);
+Monitor *curmon(void);
 
 #endif /* DSWM_H */
