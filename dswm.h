@@ -88,16 +88,6 @@ static int ws6 __attribute__((unused)) = 6;
 static int ws7 __attribute__((unused)) = 7;
 static int ws8 __attribute__((unused)) = 8;
 
-static int mon0 __attribute__((unused)) = 0;
-static int mon1 __attribute__((unused)) = 1;
-static int mon2 __attribute__((unused)) = 2;
-
-static int sv1 __attribute__((unused)) = 1;
-static int sv2 __attribute__((unused)) = 2;
-static int sv3 __attribute__((unused)) = 3;
-static int sv4 __attribute__((unused)) = 4;
-static int sv5 __attribute__((unused)) = 5;
-
 #define WS(n)                                                          \
         { MODKEY,         XK_##n, SWITCH_WORKSPACE,  { .i = n-1 } },   \
         { MODKEY|SHTKEY,  XK_##n, MOVE_TO_WORKSPACE, { .i = n-1 } }
@@ -134,14 +124,14 @@ static Key keys[] __attribute__((unused)) = {
     { MODKEY|SHTKEY,    XK_space,  TOGGLE_FLOAT,   { 0 } },
 
     /* focus monitor */
-    { MODKEY,           XK_comma,  FOCUS_MONITOR,  { .v = &mon0 } },
-    { MODKEY,           XK_period, FOCUS_MONITOR,  { .v = &mon1 } },
-    { MODKEY,           XK_slash,  FOCUS_MONITOR,  { .v = &mon2 } },
+    { MODKEY,           XK_comma,  FOCUS_MONITOR,  { .i = 0 } },
+    { MODKEY,           XK_period, FOCUS_MONITOR,  { .i = 1 } },
+    { MODKEY,           XK_slash,  FOCUS_MONITOR,  { .i = 2 } },
 
     /* scroll visible */
-    { MODKEY|SHTKEY,    XK_comma,  SET_SCROLL_VISIBLE, { .v = &sv2 } },
-    { MODKEY|SHTKEY,    XK_period, SET_SCROLL_VISIBLE, { .v = &sv3 } },
-    { MODKEY|SHTKEY,    XK_slash,  SET_SCROLL_VISIBLE, { .v = &sv4 } },
+    { MODKEY|SHTKEY,    XK_comma,  SET_SCROLL_VISIBLE, { .i = 2 } },
+    { MODKEY|SHTKEY,    XK_period, SET_SCROLL_VISIBLE, { .i = 3 } },
+    { MODKEY|SHTKEY,    XK_slash,  SET_SCROLL_VISIBLE, { .i = 4 } },
 
     { MODKEY,           XK_equal,  INCR_SCROLL_VISIBLE, { 0 } },
     { MODKEY,           XK_minus,  DECR_SCROLL_VISIBLE, { 0 } },

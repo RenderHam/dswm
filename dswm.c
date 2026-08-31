@@ -331,7 +331,7 @@ resize_master(void *arg)
 static void
 focus_monitor(void *arg)
 {
-    int mon_idx = *(int *)arg;
+    int mon_idx = (int)(long)arg;
     if (mon_idx < 0 || mon_idx >= nmons) return;
     cur_ws = mons[mon_idx].current_workspace;
     if (curmon()->horizontal_mode)
@@ -345,7 +345,7 @@ focus_monitor(void *arg)
 static void
 set_scroll_visible(void *arg)
 {
-    int val = *(int *)arg;
+    int val = (int)(long)arg;
     Monitor *mon = curmon();
     Workspace *ws = curws();
     if (val < MIN_SCROLL_VIS) val = MIN_SCROLL_VIS;
@@ -925,8 +925,8 @@ handle_key_press(XKeyEvent *e)
             case TOGGLE_FLOAT:       toggle_float(); break;
             case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
             case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
-            case FOCUS_MONITOR:      focus_monitor(keys[i].arg.v); break;
-            case SET_SCROLL_VISIBLE: set_scroll_visible(keys[i].arg.v); break;
+            case FOCUS_MONITOR:      focus_monitor((void *)(long)keys[i].arg.i); break;
+            case SET_SCROLL_VISIBLE: set_scroll_visible((void *)(long)keys[i].arg.i); break;
             case INCR_SCROLL_VISIBLE: adjust_scroll_visible(1); break;
             case DECR_SCROLL_VISIBLE: adjust_scroll_visible(-1); break;
             }
