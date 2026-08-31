@@ -97,6 +97,47 @@ collect_tiled(Workspace *ws, ManagedWindow **out, int maxout, int monid)
     return n;
 }
 
+/* ---- bar strut support ---- */
+
+static void
+compute_struts(Monitor *mon, int *strut_top, int *strut_bottom,
+               int *strut_left, int *strut_right)
+{
+    Workspace *ws = curws();
+    Atom net_wm_strut, actual;
+    int format;
+    unsigned long nitems, bytes_after;
+    unsigned char *data = NULL;
+    int i;
+
+    net_wm_strut = XInternAtom(dpy, "_NET_WM_STRUT", False);
+
+    *strut_top = 0;
+    *strut_bottom = 0;
+    *strut_left = 0;
+    *strut_right = 0;
+
+    for (i = 0; i < ws->nwin; i++) {
+        if (XGetWindowProperty(dpy, ws->wins[i].window, net_wm_strut,
+                               0, 4, False, XA_CARDINAL, &actual, &format,
+                               &nitems, &bytes_after, &data) == Success
+            && data && nitems >= 4) {
+            long *strut = (long *)data;
+            /* strut format: left, right, top, bottom */
+            if (strut[0] > 0 && ws->wins[i].x < mon->x + mon->width)
+                if (strut[0] > *strut_left) *strut_left = strut[0];
+            if (strut[1] > 0 && ws->wins[i].x + ws->wins[i].width > mon->x)
+                if (strut[1] > *strut_right) *strut_right = strut[1];
+            if (strut[2] > 0 && ws->wins[i].y < mon->y + mon->height)
+                if (strut[2] > *strut_top) *strut_top = strut[2];
+            if (strut[3] > 0 && ws->wins[i].y + ws->wins[i].height > mon->y)
+                if (strut[3] > *strut_bottom) *strut_bottom = strut[3];
+            XFree(data);
+            data = NULL;
+        }
+    }
+}
+
 /* ---- tiling: horizontal scroll layout ---- */
 
 void
@@ -126,11 +167,7 @@ tile_horizontal(void)
         else
             own_bar_bottom = bar_h;
 
-        /* TODO: strut from _NET_WM_STRUT_PARTIAL if needed */
-        strut_top = 0;
-        strut_bottom = 0;
-        strut_left = 0;
-        strut_right = 0;
+        compute_struts(mon, &strut_top, &strut_bottom, &strut_left, &strut_right);
 
         usable_h = mon->height - MAX(own_bar_top, strut_top)
                            - MAX(own_bar_bottom, strut_bottom);
@@ -206,10 +243,7 @@ tile_windows(void)
         else
             own_bar_bottom = bar_h;
 
-        strut_top = 0;
-        strut_bottom = 0;
-        strut_left = 0;
-        strut_right = 0;
+        compute_struts(mon, &strut_top, &strut_bottom, &strut_left, &strut_right);
 
         usable_h = mon->height - MAX(own_bar_top, strut_top)
                            - MAX(own_bar_bottom, strut_bottom);
@@ -306,6 +340,36 @@ resize_master(void *arg)
 
         tile_windows();
     }
+}
+
+/* ---- tiling: monitor focus ---- */
+
+void
+focus_monitor(void *arg)
+{
+    int mon_idx = *(int *)arg;
+    if (mon_idx < 0 || mon_idx >= nmons) return;
+    cur_ws = mons[mon_idx].current_workspace;
+    if (curmon()->horizontal_mode)
+        tile_horizontal();
+    else
+        tile_windows();
+}
+
+/* ---- tiling: set scroll_visible ---- */
+
+void
+set_scroll_visible(void *arg)
+{
+    int val = *(int *)arg;
+    Monitor *mon = curmon();
+    Workspace *ws = curws();
+    if (val < 1) val = 1;
+    if (val > 10) val = 10;
+    mon->scroll_windows_visible = val;
+    ws->scroll_offset = 0;
+    if (mon->horizontal_mode)
+        tile_horizontal();
 }
 
 /* ---- tiling: scroll left/right ---- */
@@ -890,8 +954,8 @@ handle_key_press(XKeyEvent *e)
             case TOGGLE_FLOAT:       toggle_float(); break;
             case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
             case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
-            case FOCUS_MONITOR:      break; /* TODO: multi-monitor */
-            case SET_SCROLL_VISIBLE: break; /* TODO: set scroll_visible */
+            case FOCUS_MONITOR:      focus_monitor(keys[i].arg.v); break;
+            case SET_SCROLL_VISIBLE: set_scroll_visible(keys[i].arg.v); break;
             case INCR_SCROLL_VISIBLE: increment_scroll_visible(); break;
             case DECR_SCROLL_VISIBLE: decrement_scroll_visible(); break;
             }
