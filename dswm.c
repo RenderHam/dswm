@@ -51,7 +51,6 @@ struct Workspace {
     int cap;
     ManagedWindow *focused;
     int scroll_offset;
-    int scroll_maximized;
 };
 
 /* globals */
@@ -138,16 +137,40 @@ compute_struts(const Monitor *mon, int *strut_top, int *strut_bottom,
     }
 }
 
+/* ---- tiling: compute usable area (shared by all layouts) ---- */
+
+static void
+compute_usable_area(const Monitor *mon, int *usable_w, int *usable_h,
+                    int *x_start, int *y_start)
+{
+    int own_bar_top = 0, own_bar_bottom = 0;
+    int strut_top, strut_bottom, strut_left, strut_right;
+
+    if (BAR_POSITION == 0)
+        own_bar_top = BAR_HEIGHT;
+    else
+        own_bar_bottom = BAR_HEIGHT;
+
+    compute_struts(mon, &strut_top, &strut_bottom, &strut_left, &strut_right);
+
+    *usable_h = mon->height - MAX(own_bar_top, strut_top)
+                       - MAX(own_bar_bottom, strut_bottom);
+    *usable_w = mon->width - strut_left - strut_right;
+    *x_start  = mon->x + strut_left;
+    *y_start  = mon->y + MAX(own_bar_top, strut_top);
+
+    if (*usable_h < MIN_WIN_DIM) *usable_h = mon->height;
+    if (*usable_w < MIN_WIN_DIM) *usable_w = mon->width;
+}
+
 /* ---- tiling: horizontal scroll layout ---- */
 
 static void
 tile_horizontal(void)
 {
     Workspace *ws = curws();
-    ManagedWindow *tiled[256];
+    ManagedWindow *tiled[MAX_TILED];
     int ntiled, i, k;
-    int bar_h, own_bar_top, own_bar_bottom;
-    int strut_top, strut_bottom, strut_left, strut_right;
     int usable_h, usable_w, x_start, y_start;
     int scroll_vis, base_ww, ww;
     int all_fit;
@@ -155,41 +178,21 @@ tile_horizontal(void)
 
     for (k = 0; k < nmons; k++) {
         Monitor *mon = &mons[k];
-        ntiled = collect_tiled(ws, tiled, 256, mon->id);
+        ntiled = collect_tiled(ws, tiled, MAX_TILED, mon->id);
         if (ntiled == 0) continue;
 
-        /* external bar strut (polybar etc.) */
-        bar_h = BAR_HEIGHT;
-        own_bar_top = 0;
-        own_bar_bottom = 0;
-        if (BAR_POSITION == 0)
-            own_bar_top = bar_h;
-        else
-            own_bar_bottom = bar_h;
-
-        compute_struts(mon, &strut_top, &strut_bottom, &strut_left, &strut_right);
-
-        usable_h = mon->height - MAX(own_bar_top, strut_top)
-                           - MAX(own_bar_bottom, strut_bottom);
-        usable_w = mon->width - strut_left - strut_right;
-        x_start  = mon->x + strut_left;
-        y_start  = mon->y + MAX(own_bar_top, strut_top);
-
-        if (usable_h < 10) usable_h = mon->height;
-        if (usable_w < 10) usable_w = mon->width;
+        compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
         scroll_vis = mon->scroll_windows_visible;
-        if (scroll_vis < 1) scroll_vis = 1;
+        if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
 
         base_ww = usable_w / scroll_vis;
-        ww = ws->scroll_maximized
-             ? usable_w
-             : (int)(base_ww * mon->master_factor);
-        if (ww < 200) ww = 200;
+        ww = (int)(base_ww * mon->master_factor);
+        if (ww < MIN_WIN_W) ww = MIN_WIN_W;
         if (ww > usable_w) ww = usable_w;
 
         all_fit = (ntiled <= scroll_vis);
-        if (all_fit && !ws->scroll_maximized) {
+        if (all_fit) {
             ws->scroll_offset = 0;
             ww = (int)(base_ww * mon->master_factor);
         }
@@ -223,36 +226,17 @@ static void
 tile_windows(void)
 {
     Workspace *ws = curws();
-    ManagedWindow *tiled[256];
+    ManagedWindow *tiled[MAX_TILED];
     int ntiled, i, k;
-    int bar_h, own_bar_top, own_bar_bottom;
-    int strut_top, strut_bottom, strut_left, strut_right;
     int usable_h, usable_w, x_start, y_start;
     int master_w, stack_x, stack_w, stack_h;
 
     for (k = 0; k < nmons; k++) {
         Monitor *mon = &mons[k];
-        ntiled = collect_tiled(ws, tiled, 256, mon->id);
+        ntiled = collect_tiled(ws, tiled, MAX_TILED, mon->id);
         if (ntiled == 0) continue;
 
-        bar_h = BAR_HEIGHT;
-        own_bar_top = 0;
-        own_bar_bottom = 0;
-        if (BAR_POSITION == 0)
-            own_bar_top = bar_h;
-        else
-            own_bar_bottom = bar_h;
-
-        compute_struts(mon, &strut_top, &strut_bottom, &strut_left, &strut_right);
-
-        usable_h = mon->height - MAX(own_bar_top, strut_top)
-                           - MAX(own_bar_bottom, strut_bottom);
-        usable_w = mon->width - strut_left - strut_right;
-        x_start  = mon->x + strut_left;
-        y_start  = mon->y + MAX(own_bar_top, strut_top);
-
-        if (usable_h < 10) usable_h = mon->height;
-        if (usable_w < 10) usable_w = mon->width;
+        compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
         if (ntiled == 1) {
             /* single window: fill entire space */
@@ -326,8 +310,8 @@ resize_master(void *arg)
 
         delta_f = (float)delta / (mon->width / scroll_vis);
         mon->master_factor += delta_f;
-        if (mon->master_factor < 0.3f) mon->master_factor = 0.3f;
-        if (mon->master_factor > 3.0f) mon->master_factor = 3.0f;
+        if (mon->master_factor < MIN_MASTER_HORIZ) mon->master_factor = MIN_MASTER_HORIZ;
+        if (mon->master_factor > MAX_MASTER_HORIZ) mon->master_factor = MAX_MASTER_HORIZ;
 
         tile_horizontal();
     } else {
@@ -335,8 +319,8 @@ resize_master(void *arg)
 
         delta_f = (float)delta / mon->width;
         mon->master_factor += delta_f;
-        if (mon->master_factor < 0.1f) mon->master_factor = 0.1f;
-        if (mon->master_factor > 0.9f) mon->master_factor = 0.9f;
+        if (mon->master_factor < MIN_MASTER_VERT) mon->master_factor = MIN_MASTER_VERT;
+        if (mon->master_factor > MAX_MASTER_VERT) mon->master_factor = MAX_MASTER_VERT;
 
         tile_windows();
     }
@@ -364,8 +348,8 @@ set_scroll_visible(void *arg)
     int val = *(int *)arg;
     Monitor *mon = curmon();
     Workspace *ws = curws();
-    if (val < 1) val = 1;
-    if (val > 10) val = 10;
+    if (val < MIN_SCROLL_VIS) val = MIN_SCROLL_VIS;
+    if (val > MAX_SCROLL_VIS) val = MAX_SCROLL_VIS;
     mon->scroll_windows_visible = val;
     ws->scroll_offset = 0;
     if (mon->horizontal_mode)
@@ -389,9 +373,7 @@ move_horizontal(int forward)
     if (scroll_vis < 1) scroll_vis = 1;
 
     base_ww = mon->width / scroll_vis;
-    ww = ws->scroll_maximized
-         ? mon->width
-         : (int)(base_ww * mon->master_factor);
+    ww = (int)(base_ww * mon->master_factor);
 
     if (forward) {
         total_w = ws->nwin * ww;
@@ -409,18 +391,6 @@ move_horizontal(int forward)
     }
 
     tile_horizontal();
-}
-
-static void
-scroll_left(void)
-{
-    move_horizontal(0);
-}
-
-static void
-scroll_right(void)
-{
-    move_horizontal(1);
 }
 
 /* ---- tiling: toggle layout mode ---- */
@@ -490,30 +460,19 @@ swap_prev(void)
     swap_impl(-1);
 }
 
-/* ---- tiling: increment/decrement scroll_visible ---- */
+/* ---- tiling: adjust scroll_visible ---- */
 
 static void
-increment_scroll_visible(void)
+adjust_scroll_visible(int delta)
 {
     Monitor *mon = curmon();
     Workspace *ws = curws();
 
-    mon->scroll_windows_visible++;
-    if (mon->scroll_windows_visible > 10) mon->scroll_windows_visible = 10;
-    ws->scroll_offset = 0;
-
-    if (mon->horizontal_mode)
-        tile_horizontal();
-}
-
-static void
-decrement_scroll_visible(void)
-{
-    Monitor *mon = curmon();
-    Workspace *ws = curws();
-
-    mon->scroll_windows_visible--;
-    if (mon->scroll_windows_visible < 1) mon->scroll_windows_visible = 1;
+    mon->scroll_windows_visible += delta;
+    if (mon->scroll_windows_visible < MIN_SCROLL_VIS)
+        mon->scroll_windows_visible = MIN_SCROLL_VIS;
+    if (mon->scroll_windows_visible > MAX_SCROLL_VIS)
+        mon->scroll_windows_visible = MAX_SCROLL_VIS;
     ws->scroll_offset = 0;
 
     if (mon->horizontal_mode)
@@ -732,14 +691,6 @@ quit_wm(void)
 }
 
 /* ---- toggle states ---- */
-
-static void
-toggle_gap(void)
-{
-    /* GAP_OUTER/GAP_INNER are compile-time; toggle needs runtime state.
-       For now this is a no-op placeholder. A runtime flag would be needed
-       to make gaps toggleable without recompiling. */
-}
 
 static void
 toggle_fullscreen(void)
@@ -967,18 +918,17 @@ handle_key_press(XKeyEvent *e)
             case SWAP_NEXT:          swap_next(); break;
             case SWAP_PREV:          swap_prev(); break;
             case RESIZE_MASTER:      resize_master((void *)(long)keys[i].arg.i); break;
-            case SCROLL_LEFT:        scroll_left(); break;
-            case SCROLL_RIGHT:       scroll_right(); break;
+            case SCROLL_LEFT:        move_horizontal(0); break;
+            case SCROLL_RIGHT:       move_horizontal(1); break;
             case TOGGLE_LAYOUT:      toggle_layout(); break;
-            case TOGGLE_GAP:         toggle_gap(); break;
             case TOGGLE_FULLSCREEN:  toggle_fullscreen(); break;
             case TOGGLE_FLOAT:       toggle_float(); break;
             case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
             case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
             case FOCUS_MONITOR:      focus_monitor(keys[i].arg.v); break;
             case SET_SCROLL_VISIBLE: set_scroll_visible(keys[i].arg.v); break;
-            case INCR_SCROLL_VISIBLE: increment_scroll_visible(); break;
-            case DECR_SCROLL_VISIBLE: decrement_scroll_visible(); break;
+            case INCR_SCROLL_VISIBLE: adjust_scroll_visible(1); break;
+            case DECR_SCROLL_VISIBLE: adjust_scroll_visible(-1); break;
             }
             break;
         }
@@ -1079,7 +1029,6 @@ init(void)
         spaces[i].cap = 0;
         spaces[i].focused = NULL;
         spaces[i].scroll_offset = 0;
-        spaces[i].scroll_maximized = 0;
     }
 
     monitors_init();

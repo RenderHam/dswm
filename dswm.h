@@ -29,6 +29,14 @@
 #define INITIAL_CAP        16
 #define MAX_MONS           8
 #define MAX_TILED          256
+#define MIN_WIN_DIM        10
+#define MIN_WIN_W          200
+#define MIN_MASTER_HORIZ   0.3f
+#define MAX_MASTER_HORIZ   3.0f
+#define MIN_MASTER_VERT    0.1f
+#define MAX_MASTER_VERT    0.9f
+#define MIN_SCROLL_VIS     1
+#define MAX_SCROLL_VIS     10
 
 /* modifier keys */
 #define MODKEY             Mod4Mask
@@ -55,7 +63,7 @@ enum {
     SWAP_PREV, SWAP_NEXT,
     RESIZE_MASTER,
     SCROLL_LEFT, SCROLL_RIGHT,
-    TOGGLE_LAYOUT, TOGGLE_GAP, TOGGLE_FULLSCREEN, TOGGLE_FLOAT,
+    TOGGLE_LAYOUT, TOGGLE_FULLSCREEN, TOGGLE_FLOAT,
     FOCUS_MONITOR,
     SET_SCROLL_VISIBLE,
     INCR_SCROLL_VISIBLE, DECR_SCROLL_VISIBLE,
@@ -122,7 +130,6 @@ static Key keys[] __attribute__((unused)) = {
 
     /* toggle states */
     { MODKEY,           XK_t,      TOGGLE_LAYOUT,  { 0 } },
-    { MODKEY,           XK_a,      TOGGLE_GAP,     { 0 } },
     { MODKEY,           XK_f,      TOGGLE_FULLSCREEN, { 0 } },
     { MODKEY|SHTKEY,    XK_space,  TOGGLE_FLOAT,   { 0 } },
 
