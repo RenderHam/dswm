@@ -9,22 +9,17 @@ X11LIBS     ?= -L/usr/lib -lX11 -lXinerama
 CFLAGS      += -O2 -Wall -Wextra $(X11CFLAGS)
 LDFLAGS     += $(X11LIBS)
 
-SRC         = dswm.c layout.c workspace.c events.c ewmh.c util.c
-OBJ         = $(SRC:.c=.o)
-
 all: dswm dswm-session
 
-dswm: $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS)
-
-%.o: %.c dswm.h
-	$(CC) $(CFLAGS) -c -o $@ $<
+dswm: dswm.c dswm.h
+	$(CC) $(CFLAGS) -o $@ dswm.c $(LDFLAGS)
 
 dswm-session: dswm-session.c
 	$(CC) $(CFLAGS) -o $@ dswm-session.c $(LDFLAGS)
 
 clean:
-	rm -f dswm dswm-session $(OBJ)
+	rm -rf dswm
+	rm -f dswm-session
 	rm -rf pkg/ src/
 	rm -f dswm-git-*.pkg.tar.zst
 
