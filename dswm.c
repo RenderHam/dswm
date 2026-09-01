@@ -339,6 +339,57 @@ update_border(Window w, int focused)
 }
 
 static void
+refocus(Workspace *ws, ManagedWindow *new)
+{
+    if (ws->focused && ws->focused != new)
+        update_border(ws->focused->window, 0);
+    ws->focused = new;
+    if (new) {
+        update_border(new->window, 1);
+        XSetInputFocus(dpy, new->window, RevertToPointerRoot, CurrentTime);
+        XRaiseWindow(dpy, new->window);
+    }
+}
+
+static void
+auto_monitor_focus(void)
+{
+    Monitor *mon = curmon();
+    Workspace *ws = curws();
+    ManagedWindow *w = ws->focused;
+    int i, cx, cy;
+
+    if (!w) return;
+
+    cx = w->x + w->width / 2;
+    cy = w->y + w->height / 2;
+
+    if (cx >= mon->x && cx < mon->x + mon->width &&
+        cy >= mon->y && cy < mon->y + mon->height)
+        return;
+
+    for (i = 0; i < nmons; i++) {
+        if (mons[i].id == mon->id) continue;
+        if (cx >= mons[i].x && cx < mons[i].x + mons[i].width &&
+            cy >= mons[i].y && cy < mons[i].y + mons[i].height) {
+            int old_ws = cur_ws;
+            int new_ws = mons[i].current_workspace;
+            if (new_ws != old_ws) {
+                show_workspace(old_ws, 0);
+                cur_ws = new_ws;
+                show_workspace(cur_ws, 1);
+                if (curmon()->horizontal_mode)
+                    tile_horizontal();
+                else
+                    tile_windows();
+                update_ewmh_current_desktop();
+            }
+            return;
+        }
+    }
+}
+
+static void
 focus_monitor(void *arg)
 {
     int mon_idx = (int)(long)arg;
@@ -577,7 +628,7 @@ move_to_workspace(void *arg)
     /* hide the moved window (it's on a non-active workspace now) */
     XUnmapWindow(dpy, win.window);
 
-    ws->focused = NULL;
+    refocus(ws, NULL);
     if (curmon()->horizontal_mode)
         tile_horizontal();
     else
@@ -629,10 +680,9 @@ manage_window(Window w)
         ws->cap = newcap;
     }
     ws->wins[ws->nwin++] = mw;
-    ws->focused = &ws->wins[ws->nwin - 1];
 
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask);
-    update_border(w, 1);
+    refocus(ws, &ws->wins[ws->nwin - 1]);
 
     /* only map if on the current workspace */
     if (mw.workspace == cur_ws)
@@ -660,6 +710,8 @@ unmanage_window(Window w)
     }
 
     ws->focused = (ws->nwin > 0) ? &ws->wins[ws->nwin - 1] : NULL;
+    if (ws->focused)
+        update_border(ws->focused->window, 1);
 
     if (curmon()->horizontal_mode)
         tile_horizontal();
@@ -684,14 +736,8 @@ focus_next(void)
         }
     }
 
-    if (cur >= 0)
-        update_border(ws->wins[cur].window, 0);
-
     i = (cur + 1) % ws->nwin;
-    ws->focused = &ws->wins[i];
-    update_border(ws->focused->window, 1);
-    XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
-    XRaiseWindow(dpy, ws->focused->window);
+    refocus(ws, &ws->wins[i]);
 }
 
 static void
@@ -709,14 +755,8 @@ focus_prev(void)
         }
     }
 
-    if (cur >= 0)
-        update_border(ws->wins[cur].window, 0);
-
     i = (cur - 1 + ws->nwin) % ws->nwin;
-    ws->focused = &ws->wins[i];
-    update_border(ws->focused->window, 1);
-    XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
-    XRaiseWindow(dpy, ws->focused->window);
+    refocus(ws, &ws->wins[i]);
 }
 
 /* ---- close/quit ---- */
@@ -960,12 +1000,8 @@ handle_enter_notify(XCrossingEvent *e)
 
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == e->window) {
-            if (ws->focused && ws->focused->window != e->window)
-                update_border(ws->focused->window, 0);
-            ws->focused = &ws->wins[i];
-            update_border(e->window, 1);
-            XSetInputFocus(dpy, e->window, RevertToPointerRoot, CurrentTime);
-            XRaiseWindow(dpy, e->window);
+            refocus(ws, &ws->wins[i]);
+            auto_monitor_focus();
             break;
         }
     }
@@ -1014,9 +1050,7 @@ handle_button_press(XButtonEvent *e)
 
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == e->window) {
-            ws->focused = &ws->wins[i];
-            XSetInputFocus(dpy, e->window, RevertToPointerRoot, CurrentTime);
-            XRaiseWindow(dpy, e->window);
+            refocus(ws, &ws->wins[i]);
             break;
         }
     }
