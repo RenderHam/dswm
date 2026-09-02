@@ -64,6 +64,7 @@ enum {
     RESIZE_MASTER,
     SCROLL_LEFT, SCROLL_RIGHT,
     TOGGLE_LAYOUT, TOGGLE_FULLSCREEN, TOGGLE_FLOAT,
+    TOGGLE_CENTER_FOCUSED,
     FOCUS_MONITOR,
     SET_SCROLL_VISIBLE,
     INCR_SCROLL_VISIBLE, DECR_SCROLL_VISIBLE,
@@ -122,6 +123,7 @@ static Key keys[] __attribute__((unused)) = {
     { MODKEY,           XK_t,      TOGGLE_LAYOUT,  { 0 } },
     { MODKEY,           XK_f,      TOGGLE_FULLSCREEN, { 0 } },
     { MODKEY|SHTKEY,    XK_space,  TOGGLE_FLOAT,   { 0 } },
+    { MODKEY,           XK_c,      TOGGLE_CENTER_FOCUSED, { 0 } },
 
     /* focus monitor */
     { MODKEY,           XK_comma,  FOCUS_MONITOR,  { .i = 0 } },

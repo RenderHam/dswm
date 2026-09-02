@@ -42,6 +42,7 @@ struct Monitor {
     float master_factor;
     int horizontal_mode;
     int scroll_windows_visible;
+    int center_focused;
 };
 
 typedef struct Workspace Workspace;
@@ -173,7 +174,7 @@ tile_horizontal(void)
     int ntiled, i, k;
     int usable_h, usable_w, x_start, y_start;
     int scroll_vis, base_ww, ww;
-    int all_fit;
+    int all_fit, focused_idx;
     int x_pos, y_pos, win_w, win_h;
 
     for (k = 0; k < nmons; k++) {
@@ -193,8 +194,34 @@ tile_horizontal(void)
 
         all_fit = (ntiled <= scroll_vis);
         if (all_fit) {
-            ws->scroll_offset = 0;
             ww = (int)(base_ww * mon->master_factor);
+        }
+
+        /* find focused window index */
+        focused_idx = -1;
+        if (ws->focused) {
+            for (i = 0; i < ntiled; i++) {
+                if (tiled[i]->window == ws->focused->window) {
+                    focused_idx = i;
+                    break;
+                }
+            }
+        }
+
+        /* calculate scroll offset */
+        if (!all_fit) {
+            if (mon->center_focused && focused_idx >= 0) {
+                /* center the focused window */
+                ws->scroll_offset = focused_idx * ww - (usable_w - ww) / 2;
+            } else {
+                /* scroll to show all: keep first visible window at left edge */
+                int max_off = ntiled * ww - usable_w;
+                if (max_off < 0) max_off = 0;
+                if (ws->scroll_offset > max_off)
+                    ws->scroll_offset = max_off;
+            }
+        } else {
+            ws->scroll_offset = 0;
         }
 
         for (i = 0; i < ntiled; i++) {
@@ -253,14 +280,14 @@ tile_windows(void)
         } else {
             /* master + stack */
             master_w = (int)(usable_w * mon->master_factor)
-                       - GAP_OUTER - GAP_OUTER / 2 - 2 * BORDER_WIDTH;
-            stack_x  = x_start + (int)(usable_w * mon->master_factor) + GAP_OUTER / 2;
+                       - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
+            stack_x  = x_start + (int)(usable_w * mon->master_factor) + GAP_INNER;
             stack_w  = usable_w - (int)(usable_w * mon->master_factor)
-                       - GAP_OUTER - GAP_OUTER / 2 - 2 * BORDER_WIDTH;
+                       - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
             if (master_w < 1) master_w = 1;
             if (stack_w < 1) stack_w = 1;
 
-            stack_h = (usable_h - GAP_OUTER * ntiled) / (ntiled - 1)
+            stack_h = (usable_h - GAP_OUTER * 2 - GAP_INNER * (ntiled - 1)) / (ntiled - 1)
                       - 2 * BORDER_WIDTH;
             if (stack_h < 1) stack_h = 1;
 
@@ -275,7 +302,7 @@ tile_windows(void)
             for (i = 1; i < ntiled; i++) {
                 tiled[i]->x = stack_x;
                 tiled[i]->y = y_start + GAP_OUTER
-                              + (i - 1) * (stack_h + GAP_OUTER + 2 * BORDER_WIDTH);
+                              + (i - 1) * (stack_h + GAP_INNER + 2 * BORDER_WIDTH);
                 tiled[i]->width = stack_w;
                 tiled[i]->height = stack_h;
             }
@@ -845,6 +872,15 @@ toggle_float(void)
     XFlush(dpy);
 }
 
+static void
+toggle_center_focused(void)
+{
+    Monitor *mon = curmon();
+    mon->center_focused = !mon->center_focused;
+    if (mon->horizontal_mode)
+        tile_horizontal();
+}
+
 /* ---- spawn ---- */
 
 static void
@@ -1004,6 +1040,7 @@ handle_key_press(XKeyEvent *e)
             case TOGGLE_LAYOUT:      toggle_layout(); break;
             case TOGGLE_FULLSCREEN:  toggle_fullscreen(); break;
             case TOGGLE_FLOAT:       toggle_float(); break;
+            case TOGGLE_CENTER_FOCUSED: toggle_center_focused(); break;
             case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
             case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
             case FOCUS_MONITOR:      focus_monitor((void *)(long)keys[i].arg.i); break;
@@ -1046,8 +1083,9 @@ monitors_init(void)
     mons[0].height = scrh;
     mons[0].current_workspace = 0;
     mons[0].master_factor = 0.5f;
-    mons[0].horizontal_mode = 0;
+    mons[0].horizontal_mode = 1;
     mons[0].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
+    mons[0].center_focused = 1;
 #else
     if (USE_XINERAMA) {
         int nscreens;
@@ -1065,8 +1103,9 @@ monitors_init(void)
                 mons[i].height = screens[i].height;
                 mons[i].current_workspace = i % NUM_WORKSPACES;
                 mons[i].master_factor = 0.5f;
-                mons[i].horizontal_mode = 0;
+                mons[i].horizontal_mode = 1;
                 mons[i].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
+                mons[i].center_focused = 1;
             }
             XFree(screens);
             return;
@@ -1082,8 +1121,9 @@ monitors_init(void)
     mons[0].height = scrh;
     mons[0].current_workspace = 0;
     mons[0].master_factor = 0.5f;
-    mons[0].horizontal_mode = 0;
+    mons[0].horizontal_mode = 1;
     mons[0].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
+    mons[0].center_focused = 1;
 #endif
 }
 
