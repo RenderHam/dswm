@@ -22,7 +22,6 @@ struct ManagedWindow {
     Window window;
     int x, y, width, height;
     int is_floating;
-    int is_focused;
     int is_fullscreen;
     int workspace;
     int monitor;
@@ -42,7 +41,9 @@ struct Monitor {
     float master_factor;
     int horizontal_mode;
     int scroll_windows_visible;
-    int center_focused;
+    /* cached struts */
+    int strut_top, strut_bottom, strut_left, strut_right;
+    int strut_valid;
 };
 
 typedef struct Workspace Workspace;
@@ -100,8 +101,7 @@ collect_tiled(const Workspace *ws, ManagedWindow **out, int maxout, int monid)
 /* ---- bar strut support ---- */
 
 void
-compute_struts(const Monitor *mon, int *strut_top, int *strut_bottom,
-               int *strut_left, int *strut_right)
+compute_struts(Monitor *mon)
 {
     Workspace *ws = curws();
     Atom net_wm_strut, actual;
@@ -110,12 +110,14 @@ compute_struts(const Monitor *mon, int *strut_top, int *strut_bottom,
     unsigned char *data = NULL;
     int i;
 
+    if (mon->strut_valid) return;
+
     net_wm_strut = XInternAtom(dpy, "_NET_WM_STRUT", False);
 
-    *strut_top = 0;
-    *strut_bottom = 0;
-    *strut_left = 0;
-    *strut_right = 0;
+    mon->strut_top = 0;
+    mon->strut_bottom = 0;
+    mon->strut_left = 0;
+    mon->strut_right = 0;
 
     for (i = 0; i < ws->nwin; i++) {
         if (XGetWindowProperty(dpy, ws->wins[i].window, net_wm_strut,
@@ -123,42 +125,42 @@ compute_struts(const Monitor *mon, int *strut_top, int *strut_bottom,
                                &nitems, &bytes_after, &data) == Success
             && data && nitems >= 4) {
             long *strut = (long *)data;
-            /* strut format: left, right, top, bottom */
             if (strut[0] > 0 && ws->wins[i].x < mon->x + mon->width)
-                if (strut[0] > *strut_left) *strut_left = strut[0];
+                if (strut[0] > mon->strut_left) mon->strut_left = strut[0];
             if (strut[1] > 0 && ws->wins[i].x + ws->wins[i].width > mon->x)
-                if (strut[1] > *strut_right) *strut_right = strut[1];
+                if (strut[1] > mon->strut_right) mon->strut_right = strut[1];
             if (strut[2] > 0 && ws->wins[i].y < mon->y + mon->height)
-                if (strut[2] > *strut_top) *strut_top = strut[2];
+                if (strut[2] > mon->strut_top) mon->strut_top = strut[2];
             if (strut[3] > 0 && ws->wins[i].y + ws->wins[i].height > mon->y)
-                if (strut[3] > *strut_bottom) *strut_bottom = strut[3];
+                if (strut[3] > mon->strut_bottom) mon->strut_bottom = strut[3];
             XFree(data);
             data = NULL;
         }
     }
+
+    mon->strut_valid = 1;
 }
 
 /* ---- tiling: compute usable area (shared by all layouts) ---- */
 
 static void
-compute_usable_area(const Monitor *mon, int *usable_w, int *usable_h,
+compute_usable_area(Monitor *mon, int *usable_w, int *usable_h,
                     int *x_start, int *y_start)
 {
     int own_bar_top = 0, own_bar_bottom = 0;
-    int strut_top, strut_bottom, strut_left, strut_right;
 
     if (BAR_POSITION == 0)
         own_bar_top = BAR_HEIGHT;
     else
         own_bar_bottom = BAR_HEIGHT;
 
-    compute_struts(mon, &strut_top, &strut_bottom, &strut_left, &strut_right);
+    compute_struts(mon);
 
-    *usable_h = mon->height - MAX(own_bar_top, strut_top)
-                       - MAX(own_bar_bottom, strut_bottom);
-    *usable_w = mon->width - strut_left - strut_right;
-    *x_start  = mon->x + strut_left;
-    *y_start  = mon->y + MAX(own_bar_top, strut_top);
+    *usable_h = mon->height - MAX(own_bar_top, mon->strut_top)
+                       - MAX(own_bar_bottom, mon->strut_bottom);
+    *usable_w = mon->width - mon->strut_left - mon->strut_right;
+    *x_start  = mon->x + mon->strut_left;
+    *y_start  = mon->y + MAX(own_bar_top, mon->strut_top);
 
     if (*usable_h < MIN_WIN_DIM) *usable_h = mon->height;
     if (*usable_w < MIN_WIN_DIM) *usable_w = mon->width;
@@ -170,78 +172,58 @@ static void
 tile_horizontal(void)
 {
     Workspace *ws = curws();
+    Monitor *mon = curmon();
     ManagedWindow *tiled[MAX_TILED];
-    int ntiled, i, k;
+    int ntiled, i;
     int usable_h, usable_w, x_start, y_start;
-    int scroll_vis, base_ww, ww;
-    int all_fit, focused_idx;
+    int scroll_vis, ww;
+    int all_fit;
     int x_pos, y_pos, win_w, win_h;
 
-    for (k = 0; k < nmons; k++) {
-        Monitor *mon = &mons[k];
-        ntiled = collect_tiled(ws, tiled, MAX_TILED, mon->id);
-        if (ntiled == 0) continue;
+    ntiled = collect_tiled(ws, tiled, MAX_TILED, mon->id);
+    if (ntiled == 0) return;
 
-        compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
+    compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
-        scroll_vis = mon->scroll_windows_visible;
-        if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
+    scroll_vis = mon->scroll_windows_visible;
+    if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
 
-        base_ww = usable_w / scroll_vis;
-        ww = (int)(base_ww * mon->master_factor);
-        if (ww < MIN_WIN_W) ww = MIN_WIN_W;
-        if (ww > usable_w) ww = usable_w;
+    all_fit = (ntiled <= scroll_vis);
 
-        all_fit = (ntiled <= scroll_vis);
-        if (all_fit) {
-            ww = (int)(base_ww * mon->master_factor);
-        }
+    if (all_fit) {
+        ww = usable_w / ntiled;
+    } else {
+        ww = usable_w / scroll_vis;
+    }
+    if (ww < MIN_WIN_W) ww = MIN_WIN_W;
+    if (ww > usable_w) ww = usable_w;
 
-        /* find focused window index */
-        focused_idx = -1;
-        if (ws->focused) {
-            for (i = 0; i < ntiled; i++) {
-                if (tiled[i]->window == ws->focused->window) {
-                    focused_idx = i;
-                    break;
-                }
-            }
-        }
+    if (!all_fit) {
+        int max_off = ntiled * ww - usable_w;
+        if (max_off < 0) max_off = 0;
+        if (ws->scroll_offset < 0) ws->scroll_offset = 0;
+        if (ws->scroll_offset > max_off) ws->scroll_offset = max_off;
+    } else {
+        ws->scroll_offset = 0;
+    }
 
-        /* calculate scroll offset */
-        if (!all_fit) {
-            if (mon->center_focused && focused_idx >= 0) {
-                /* center the focused window */
-                ws->scroll_offset = focused_idx * ww - (usable_w - ww) / 2;
-            } else {
-                /* scroll to show all: keep first visible window at left edge */
-                int max_off = ntiled * ww - usable_w;
-                if (max_off < 0) max_off = 0;
-                if (ws->scroll_offset > max_off)
-                    ws->scroll_offset = max_off;
-            }
-        } else {
-            ws->scroll_offset = 0;
-        }
+    for (i = 0; i < ntiled; i++) {
+        int scroll_off = all_fit ? 0 : ws->scroll_offset;
+        x_pos = x_start + i * ww - scroll_off + GAP_OUTER;
+        y_pos = y_start + GAP_OUTER;
+        win_w = ww - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (win_w < 1) win_w = 1;
+        if (win_h < 1) win_h = 1;
 
-        for (i = 0; i < ntiled; i++) {
-            int scroll_off = all_fit ? 0 : ws->scroll_offset;
-            x_pos = x_start + i * ww - scroll_off + GAP_OUTER;
-            y_pos = y_start + GAP_OUTER;
-            win_w = ww - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            if (win_w < 1) win_w = 1;
-            if (win_h < 1) win_h = 1;
+        tiled[i]->x = x_pos;
+        tiled[i]->y = y_pos;
+        tiled[i]->width = win_w;
+        tiled[i]->height = win_h;
 
-            tiled[i]->x = x_pos;
-            tiled[i]->y = y_pos;
-            tiled[i]->width = win_w;
-            tiled[i]->height = win_h;
-
-            XMoveResizeWindow(dpy, tiled[i]->window,
-                              tiled[i]->x, tiled[i]->y,
-                              tiled[i]->width, tiled[i]->height);
-        }
+        XMoveResizeWindow(dpy, tiled[i]->window,
+                          tiled[i]->x, tiled[i]->y,
+                          tiled[i]->width, tiled[i]->height);
     }
 
     XFlush(dpy);
@@ -253,66 +235,59 @@ static void
 tile_windows(void)
 {
     Workspace *ws = curws();
+    Monitor *mon = curmon();
     ManagedWindow *tiled[MAX_TILED];
-    int ntiled, i, k;
+    int ntiled, i;
     int usable_h, usable_w, x_start, y_start;
     int master_w, stack_x, stack_w, stack_h;
 
-    for (k = 0; k < nmons; k++) {
-        Monitor *mon = &mons[k];
-        ntiled = collect_tiled(ws, tiled, MAX_TILED, mon->id);
-        if (ntiled == 0) continue;
+    ntiled = collect_tiled(ws, tiled, MAX_TILED, mon->id);
+    if (ntiled == 0) return;
 
-        compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
+    compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
-        if (ntiled == 1) {
-            /* single window: fill entire space */
-            tiled[0]->x = x_start + GAP_OUTER;
-            tiled[0]->y = y_start + GAP_OUTER;
-            tiled[0]->width = usable_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            if (tiled[0]->width < 1) tiled[0]->width = 1;
-            if (tiled[0]->height < 1) tiled[0]->height = 1;
+    if (ntiled == 1) {
+        tiled[0]->x = x_start + GAP_OUTER;
+        tiled[0]->y = y_start + GAP_OUTER;
+        tiled[0]->width = usable_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (tiled[0]->width < 1) tiled[0]->width = 1;
+        if (tiled[0]->height < 1) tiled[0]->height = 1;
 
-            XMoveResizeWindow(dpy, tiled[0]->window,
-                              tiled[0]->x, tiled[0]->y,
-                              tiled[0]->width, tiled[0]->height);
-        } else {
-            /* master + stack */
-            master_w = (int)(usable_w * mon->master_factor)
-                       - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
-            stack_x  = x_start + (int)(usable_w * mon->master_factor) + GAP_INNER;
-            stack_w  = usable_w - (int)(usable_w * mon->master_factor)
-                       - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
-            if (master_w < 1) master_w = 1;
-            if (stack_w < 1) stack_w = 1;
+        XMoveResizeWindow(dpy, tiled[0]->window,
+                          tiled[0]->x, tiled[0]->y,
+                          tiled[0]->width, tiled[0]->height);
+    } else {
+        master_w = (int)(usable_w * mon->master_factor)
+                   - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
+        stack_x  = x_start + (int)(usable_w * mon->master_factor) + GAP_INNER;
+        stack_w  = usable_w - (int)(usable_w * mon->master_factor)
+                   - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
+        if (master_w < 1) master_w = 1;
+        if (stack_w < 1) stack_w = 1;
 
-            stack_h = (usable_h - GAP_OUTER * 2 - GAP_INNER * (ntiled - 1)) / (ntiled - 1)
-                      - 2 * BORDER_WIDTH;
-            if (stack_h < 1) stack_h = 1;
+        stack_h = (usable_h - GAP_OUTER * 2 - GAP_INNER * (ntiled - 1)) / (ntiled - 1)
+                  - 2 * BORDER_WIDTH;
+        if (stack_h < 1) stack_h = 1;
 
-            /* master window */
-            tiled[0]->x = x_start + GAP_OUTER;
-            tiled[0]->y = y_start + GAP_OUTER;
-            tiled[0]->width = master_w;
-            tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            if (tiled[0]->height < 1) tiled[0]->height = 1;
+        tiled[0]->x = x_start + GAP_OUTER;
+        tiled[0]->y = y_start + GAP_OUTER;
+        tiled[0]->width = master_w;
+        tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (tiled[0]->height < 1) tiled[0]->height = 1;
 
-            /* stack windows */
-            for (i = 1; i < ntiled; i++) {
-                tiled[i]->x = stack_x;
-                tiled[i]->y = y_start + GAP_OUTER
-                              + (i - 1) * (stack_h + GAP_INNER + 2 * BORDER_WIDTH);
-                tiled[i]->width = stack_w;
-                tiled[i]->height = stack_h;
-            }
+        for (i = 1; i < ntiled; i++) {
+            tiled[i]->x = stack_x;
+            tiled[i]->y = y_start + GAP_OUTER
+                          + (i - 1) * (stack_h + GAP_INNER + 2 * BORDER_WIDTH);
+            tiled[i]->width = stack_w;
+            tiled[i]->height = stack_h;
+        }
 
-            /* apply all */
-            for (i = 0; i < ntiled; i++) {
-                XMoveResizeWindow(dpy, tiled[i]->window,
-                                  tiled[i]->x, tiled[i]->y,
-                                  tiled[i]->width, tiled[i]->height);
-            }
+        for (i = 0; i < ntiled; i++) {
+            XMoveResizeWindow(dpy, tiled[i]->window,
+                              tiled[i]->x, tiled[i]->y,
+                              tiled[i]->width, tiled[i]->height);
         }
     }
 
@@ -329,34 +304,33 @@ resize_master(void *arg)
     int delta = (int)(long)arg;
     float delta_f;
 
-    if (mon->horizontal_mode) {
-        if (ws->nwin == 0) return;
+    if (mon->horizontal_mode) return;
 
-        int scroll_vis = mon->scroll_windows_visible;
-        if (scroll_vis < 1) scroll_vis = 1;
+    if (ws->nwin < 2) return;
 
-        delta_f = (float)delta / (mon->width / scroll_vis);
-        mon->master_factor += delta_f;
-        if (mon->master_factor < MIN_MASTER_HORIZ) mon->master_factor = MIN_MASTER_HORIZ;
-        if (mon->master_factor > MAX_MASTER_HORIZ) mon->master_factor = MAX_MASTER_HORIZ;
+    delta_f = (float)delta / mon->width;
+    mon->master_factor += delta_f;
+    if (mon->master_factor < MIN_MASTER_VERT) mon->master_factor = MIN_MASTER_VERT;
+    if (mon->master_factor > MAX_MASTER_VERT) mon->master_factor = MAX_MASTER_VERT;
 
+    tile_windows();
+}
+
+static void
+retile(void)
+{
+    Monitor *mon = curmon();
+    if (mon->horizontal_mode)
         tile_horizontal();
-    } else {
-        if (ws->nwin < 2) return;
-
-        delta_f = (float)delta / mon->width;
-        mon->master_factor += delta_f;
-        if (mon->master_factor < MIN_MASTER_VERT) mon->master_factor = MIN_MASTER_VERT;
-        if (mon->master_factor > MAX_MASTER_VERT) mon->master_factor = MAX_MASTER_VERT;
-
+    else
         tile_windows();
-    }
 }
 
 /* ---- tiling: monitor focus ---- */
 
 static void show_workspace(int idx, int visible);
 static void update_ewmh_current_desktop(void);
+void compute_struts(Monitor *mon);
 
 static void
 update_border(Window w, int focused)
@@ -392,10 +366,7 @@ focus_monitor(void *arg)
     cur_ws = mons[mon_idx].current_workspace;
     show_workspace(cur_ws, 1);
 
-    if (curmon()->horizontal_mode)
-        tile_horizontal();
-    else
-        tile_windows();
+    retile();
 
     update_ewmh_current_desktop();
 }
@@ -408,9 +379,20 @@ set_scroll_visible(void *arg)
     int val = (int)(long)arg;
     Monitor *mon = curmon();
     Workspace *ws = curws();
-    if (val < MIN_SCROLL_VIS) val = MIN_SCROLL_VIS;
-    if (val > MAX_SCROLL_VIS) val = MAX_SCROLL_VIS;
-    mon->scroll_windows_visible = val;
+
+    /* positive = absolute set, negative = relative adjust */
+    if (val >= 0) {
+        if (val < MIN_SCROLL_VIS) val = MIN_SCROLL_VIS;
+        if (val > MAX_SCROLL_VIS) val = MAX_SCROLL_VIS;
+        mon->scroll_windows_visible = val;
+    } else {
+        mon->scroll_windows_visible += val;
+        if (mon->scroll_windows_visible < MIN_SCROLL_VIS)
+            mon->scroll_windows_visible = MIN_SCROLL_VIS;
+        if (mon->scroll_windows_visible > MAX_SCROLL_VIS)
+            mon->scroll_windows_visible = MAX_SCROLL_VIS;
+    }
+
     ws->scroll_offset = 0;
     if (mon->horizontal_mode)
         tile_horizontal();
@@ -423,8 +405,7 @@ move_horizontal(int forward)
 {
     Monitor *mon = curmon();
     Workspace *ws = curws();
-    int scroll_vis, base_ww, ww, total_w, max_scroll;
-    int scroll_amount;
+    int scroll_vis, ww, total_w, max_scroll;
 
     if (!mon->horizontal_mode) return;
     if (ws->nwin == 0) return;
@@ -432,20 +413,17 @@ move_horizontal(int forward)
     scroll_vis = mon->scroll_windows_visible;
     if (scroll_vis < 1) scroll_vis = 1;
 
-    base_ww = mon->width / scroll_vis;
-    ww = (int)(base_ww * mon->master_factor);
+    ww = mon->width / scroll_vis;
 
     if (forward) {
         total_w = ws->nwin * ww;
         max_scroll = total_w - mon->width;
         if (max_scroll < 0) max_scroll = 0;
-        scroll_amount = (int)(base_ww * mon->master_factor);
-        ws->scroll_offset += scroll_amount;
+        ws->scroll_offset += ww;
         if (ws->scroll_offset > max_scroll)
             ws->scroll_offset = max_scroll;
     } else {
-        scroll_amount = (int)(base_ww * mon->master_factor);
-        ws->scroll_offset -= scroll_amount;
+        ws->scroll_offset -= ww;
         if (ws->scroll_offset < 0)
             ws->scroll_offset = 0;
     }
@@ -500,10 +478,7 @@ swap_impl(int delta)
     ws->wins[cur_idx] = ws->wins[swap_idx];
     ws->wins[swap_idx] = tmp;
 
-    if (curmon()->horizontal_mode)
-        tile_horizontal();
-    else
-        tile_windows();
+    retile();
 
     ws->focused = &ws->wins[swap_idx];
 }
@@ -518,25 +493,6 @@ static void
 swap_prev(void)
 {
     swap_impl(-1);
-}
-
-/* ---- tiling: adjust scroll_visible ---- */
-
-static void
-adjust_scroll_visible(int delta)
-{
-    Monitor *mon = curmon();
-    Workspace *ws = curws();
-
-    mon->scroll_windows_visible += delta;
-    if (mon->scroll_windows_visible < MIN_SCROLL_VIS)
-        mon->scroll_windows_visible = MIN_SCROLL_VIS;
-    if (mon->scroll_windows_visible > MAX_SCROLL_VIS)
-        mon->scroll_windows_visible = MAX_SCROLL_VIS;
-    ws->scroll_offset = 0;
-
-    if (mon->horizontal_mode)
-        tile_horizontal();
 }
 
 /* ---- workspace management ---- */
@@ -566,10 +522,7 @@ switch_workspace(void *arg)
     cur_ws = idx;
     show_workspace(cur_ws, 1);
 
-    if (curmon()->horizontal_mode)
-        tile_horizontal();
-    else
-        tile_windows();
+    retile();
 
     update_ewmh_current_desktop();
 }
@@ -618,10 +571,7 @@ move_to_workspace(void *arg)
     XUnmapWindow(dpy, win.window);
 
     refocus(ws, NULL);
-    if (curmon()->horizontal_mode)
-        tile_horizontal();
-    else
-        tile_windows();
+    retile();
 }
 
 /* ---- window management ---- */
@@ -672,6 +622,7 @@ manage_window(Window w)
 
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask);
     refocus(ws, &ws->wins[ws->nwin - 1]);
+    curmon()->strut_valid = 0;
 
     /* only map if on the current workspace */
     if (mw.workspace == cur_ws)
@@ -681,16 +632,13 @@ manage_window(Window w)
         Monitor *mon = curmon();
         int scroll_vis = mon->scroll_windows_visible;
         if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
-        tile_horizontal();
         if (ws->nwin > scroll_vis) {
-            int base_ww = mon->width / scroll_vis;
-            int ww = (int)(base_ww * mon->master_factor);
+            int ww = mon->width / scroll_vis;
             int new_off = (ws->nwin - scroll_vis) * ww;
-            if (new_off > ws->scroll_offset) {
+            if (new_off > ws->scroll_offset)
                 ws->scroll_offset = new_off;
-                tile_horizontal();
-            }
         }
+        tile_horizontal();
     } else {
         tile_windows();
     }
@@ -707,6 +655,7 @@ unmanage_window(Window w)
             memmove(&ws->wins[i], &ws->wins[i + 1],
                     (ws->nwin - i - 1) * sizeof(ManagedWindow));
             ws->nwin--;
+            curmon()->strut_valid = 0;
             break;
         }
     }
@@ -715,10 +664,7 @@ unmanage_window(Window w)
     if (ws->focused)
         update_border(ws->focused->window, 1);
 
-    if (curmon()->horizontal_mode)
-        tile_horizontal();
-    else
-        tile_windows();
+    retile();
 }
 
 /* ---- focus ---- */
@@ -727,38 +673,104 @@ static void
 focus_next(void)
 {
     Workspace *ws = curws();
-    int i, cur = -1;
+    Monitor *mon = curmon();
+    int ntiled = 0, cur_tiled = -1, target = -1, i;
 
     if (ws->nwin == 0) return;
 
+    /* single pass: count tiled and find current tiled index */
     for (i = 0; i < ws->nwin; i++) {
-        if (ws->focused && ws->wins[i].window == ws->focused->window) {
-            cur = i;
+        if (ws->wins[i].monitor != mon->id || ws->wins[i].is_floating) continue;
+        if (ws->focused && ws->wins[i].window == ws->focused->window)
+            cur_tiled = ntiled;
+        ntiled++;
+    }
+    if (ntiled == 0) return;
+
+    /* find target tiled index */
+    target = (cur_tiled == -1) ? 0 : cur_tiled + 1;
+    if (target >= ntiled) return;
+
+    /* second pass: find window at target tiled index */
+    int count = 0;
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].monitor != mon->id || ws->wins[i].is_floating) continue;
+        if (count == target) {
+            refocus(ws, &ws->wins[i]);
             break;
         }
+        count++;
     }
 
-    i = (cur + 1) % ws->nwin;
-    refocus(ws, &ws->wins[i]);
+    /* auto-scroll if the new focus is off-screen */
+    if (mon->horizontal_mode && ntiled > mon->scroll_windows_visible) {
+        int scroll_vis = mon->scroll_windows_visible;
+        if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
+        int ww = mon->width / scroll_vis;
+        int first_visible = ws->scroll_offset / ww;
+        int last_visible = first_visible + scroll_vis - 1;
+        int old_offset = ws->scroll_offset;
+
+        if (target > last_visible) {
+            ws->scroll_offset += ww;
+        } else if (target < first_visible) {
+            ws->scroll_offset -= ww;
+            if (ws->scroll_offset < 0) ws->scroll_offset = 0;
+        }
+
+        if (ws->scroll_offset != old_offset)
+            tile_horizontal();
+    }
 }
 
 static void
 focus_prev(void)
 {
     Workspace *ws = curws();
-    int i, cur = -1;
+    Monitor *mon = curmon();
+    int ntiled = 0, cur_tiled = -1, target = -1, i;
 
     if (ws->nwin == 0) return;
 
     for (i = 0; i < ws->nwin; i++) {
-        if (ws->focused && ws->wins[i].window == ws->focused->window) {
-            cur = i;
+        if (ws->wins[i].monitor != mon->id || ws->wins[i].is_floating) continue;
+        if (ws->focused && ws->wins[i].window == ws->focused->window)
+            cur_tiled = ntiled;
+        ntiled++;
+    }
+    if (ntiled == 0) return;
+
+    target = (cur_tiled == -1) ? ntiled - 1 : cur_tiled - 1;
+    if (target < 0) return;
+
+    int count = 0;
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].monitor != mon->id || ws->wins[i].is_floating) continue;
+        if (count == target) {
+            refocus(ws, &ws->wins[i]);
             break;
         }
+        count++;
     }
 
-    i = (cur - 1 + ws->nwin) % ws->nwin;
-    refocus(ws, &ws->wins[i]);
+    if (mon->horizontal_mode && ntiled > mon->scroll_windows_visible) {
+        int scroll_vis = mon->scroll_windows_visible;
+        if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
+        int ww = mon->width / scroll_vis;
+        int first_visible = ws->scroll_offset / ww;
+        int last_visible = first_visible + scroll_vis - 1;
+        int old_offset = ws->scroll_offset;
+
+        if (target > last_visible) {
+            ws->scroll_offset += ww;
+        } else if (target < first_visible) {
+            ws->scroll_offset -= ww;
+            if (ws->scroll_offset < 0) ws->scroll_offset = 0;
+        }
+
+        if (ws->scroll_offset != old_offset)
+            tile_horizontal();
+    }
 }
 
 /* ---- close/quit ---- */
@@ -839,10 +851,7 @@ toggle_fullscreen(void)
         XChangeProperty(dpy, w->window, net_wm_state, XA_ATOM, 32,
                         PropModeReplace, (unsigned char *)0, 0);
 
-        if (curmon()->horizontal_mode)
-            tile_horizontal();
-        else
-            tile_windows();
+        retile();
     }
 
     XFlush(dpy);
@@ -863,22 +872,10 @@ toggle_float(void)
         XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
         XRaiseWindow(dpy, w->window);
     } else {
-        if (curmon()->horizontal_mode)
-            tile_horizontal();
-        else
-            tile_windows();
+        retile();
     }
 
     XFlush(dpy);
-}
-
-static void
-toggle_center_focused(void)
-{
-    Monitor *mon = curmon();
-    mon->center_focused = !mon->center_focused;
-    if (mon->horizontal_mode)
-        tile_horizontal();
 }
 
 /* ---- spawn ---- */
@@ -1040,13 +1037,12 @@ handle_key_press(XKeyEvent *e)
             case TOGGLE_LAYOUT:      toggle_layout(); break;
             case TOGGLE_FULLSCREEN:  toggle_fullscreen(); break;
             case TOGGLE_FLOAT:       toggle_float(); break;
-            case TOGGLE_CENTER_FOCUSED: toggle_center_focused(); break;
             case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
             case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
             case FOCUS_MONITOR:      focus_monitor((void *)(long)keys[i].arg.i); break;
             case SET_SCROLL_VISIBLE: set_scroll_visible((void *)(long)keys[i].arg.i); break;
-            case INCR_SCROLL_VISIBLE: adjust_scroll_visible(1); break;
-            case DECR_SCROLL_VISIBLE: adjust_scroll_visible(-1); break;
+            case INCR_SCROLL_VISIBLE: set_scroll_visible((void *)(long)1); break;
+            case DECR_SCROLL_VISIBLE: set_scroll_visible((void *)(long)-1); break;
             }
             break;
         }
@@ -1085,7 +1081,6 @@ monitors_init(void)
     mons[0].master_factor = 0.5f;
     mons[0].horizontal_mode = 1;
     mons[0].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
-    mons[0].center_focused = 1;
 #else
     if (USE_XINERAMA) {
         int nscreens;
@@ -1105,7 +1100,6 @@ monitors_init(void)
                 mons[i].master_factor = 0.5f;
                 mons[i].horizontal_mode = 1;
                 mons[i].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
-                mons[i].center_focused = 1;
             }
             XFree(screens);
             return;
@@ -1123,7 +1117,6 @@ monitors_init(void)
     mons[0].master_factor = 0.5f;
     mons[0].horizontal_mode = 1;
     mons[0].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
-    mons[0].center_focused = 1;
 #endif
 }
 

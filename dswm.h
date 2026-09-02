@@ -18,7 +18,6 @@
 #define GAP_INNER          10       /* px gap between adjacent tiled windows (per side) */
 
 #define SCROLL_WINDOWS_VISIBLE 2
-#define SCROLL_STEP        550
 #define RESIZE_STEP        60
 
 #define BAR_POSITION       0       /* 0 = top, 1 = bottom */
@@ -27,7 +26,6 @@
 #define USE_XINERAMA       1
 
 #define INITIAL_CAP        16
-#define MAX_MONS           8
 #define MAX_TILED          256
 #define MIN_WIN_DIM        10
 #define MIN_WIN_W          200
@@ -64,7 +62,6 @@ enum {
     RESIZE_MASTER,
     SCROLL_LEFT, SCROLL_RIGHT,
     TOGGLE_LAYOUT, TOGGLE_FULLSCREEN, TOGGLE_FLOAT,
-    TOGGLE_CENTER_FOCUSED,
     FOCUS_MONITOR,
     SET_SCROLL_VISIBLE,
     INCR_SCROLL_VISIBLE, DECR_SCROLL_VISIBLE,
@@ -79,16 +76,6 @@ static const char *termcmd[] __attribute__((unused))   = { "alacritty",  NULL };
 static const char *menucmd[] __attribute__((unused))   = { "rofi",       NULL };
 static const char *browsercmd[] __attribute__((unused)) = { "firefox",    NULL };
 
-static int ws0 __attribute__((unused)) = 0;
-static int ws1 __attribute__((unused)) = 1;
-static int ws2 __attribute__((unused)) = 2;
-static int ws3 __attribute__((unused)) = 3;
-static int ws4 __attribute__((unused)) = 4;
-static int ws5 __attribute__((unused)) = 5;
-static int ws6 __attribute__((unused)) = 6;
-static int ws7 __attribute__((unused)) = 7;
-static int ws8 __attribute__((unused)) = 8;
-
 #define WS(n)                                                          \
         { MODKEY,         XK_##n, SWITCH_WORKSPACE,  { .i = n-1 } },   \
         { MODKEY|SHTKEY,  XK_##n, MOVE_TO_WORKSPACE, { .i = n-1 } }
@@ -101,7 +88,7 @@ static Key keys[] __attribute__((unused)) = {
 
     /* wm control */
     { MODKEY,           XK_w,      CLOSE,          { 0 } },
-    { MODKEY|SHTKEY,    XK_w,      QUIT,           { 0 } },
+    { MODKEY|SHTKEY,    XK_q,      QUIT,           { 0 } },
 
     /* focus cycling */
     { MODKEY,           XK_j,      FOCUS_NEXT,     { 0 } },
@@ -123,7 +110,6 @@ static Key keys[] __attribute__((unused)) = {
     { MODKEY,           XK_t,      TOGGLE_LAYOUT,  { 0 } },
     { MODKEY,           XK_f,      TOGGLE_FULLSCREEN, { 0 } },
     { MODKEY|SHTKEY,    XK_space,  TOGGLE_FLOAT,   { 0 } },
-    { MODKEY,           XK_c,      TOGGLE_CENTER_FOCUSED, { 0 } },
 
     /* focus monitor */
     { MODKEY,           XK_comma,  FOCUS_MONITOR,  { .i = 0 } },
