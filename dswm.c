@@ -352,44 +352,6 @@ refocus(Workspace *ws, ManagedWindow *new)
 }
 
 static void
-auto_monitor_focus(void)
-{
-    Monitor *mon = curmon();
-    Workspace *ws = curws();
-    ManagedWindow *w = ws->focused;
-    int i, cx, cy;
-
-    if (!w) return;
-
-    cx = w->x + w->width / 2;
-    cy = w->y + w->height / 2;
-
-    if (cx >= mon->x && cx < mon->x + mon->width &&
-        cy >= mon->y && cy < mon->y + mon->height)
-        return;
-
-    for (i = 0; i < nmons; i++) {
-        if (mons[i].id == mon->id) continue;
-        if (cx >= mons[i].x && cx < mons[i].x + mons[i].width &&
-            cy >= mons[i].y && cy < mons[i].y + mons[i].height) {
-            int old_ws = cur_ws;
-            int new_ws = mons[i].current_workspace;
-            if (new_ws != old_ws) {
-                show_workspace(old_ws, 0);
-                cur_ws = new_ws;
-                show_workspace(cur_ws, 1);
-                if (curmon()->horizontal_mode)
-                    tile_horizontal();
-                else
-                    tile_windows();
-                update_ewmh_current_desktop();
-            }
-            return;
-        }
-    }
-}
-
-static void
 focus_monitor(void *arg)
 {
     int mon_idx = (int)(long)arg;
@@ -688,10 +650,23 @@ manage_window(Window w)
     if (mw.workspace == cur_ws)
         XMapWindow(dpy, w);
 
-    if (curmon()->horizontal_mode)
+    if (curmon()->horizontal_mode) {
+        Monitor *mon = curmon();
+        int scroll_vis = mon->scroll_windows_visible;
+        if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
         tile_horizontal();
-    else
+        if (ws->nwin > scroll_vis) {
+            int base_ww = mon->width / scroll_vis;
+            int ww = (int)(base_ww * mon->master_factor);
+            int new_off = (ws->nwin - scroll_vis) * ww;
+            if (new_off > ws->scroll_offset) {
+                ws->scroll_offset = new_off;
+                tile_horizontal();
+            }
+        }
+    } else {
         tile_windows();
+    }
 }
 
 static void
@@ -1001,7 +976,6 @@ handle_enter_notify(XCrossingEvent *e)
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == e->window) {
             refocus(ws, &ws->wins[i]);
-            auto_monitor_focus();
             break;
         }
     }
