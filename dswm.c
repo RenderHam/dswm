@@ -10,6 +10,8 @@
 #include <signal.h>
 #include <unistd.h>
 #include <err.h>
+#include <sys/select.h>
+#include <time.h>
 
 /* macros */
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -53,6 +55,10 @@ struct Workspace {
     int cap;
     ManagedWindow *focused;
     int scroll_offset;
+    /* animation state */
+    int scroll_target;
+    int scroll_animating;
+    struct timespec anim_start;
 };
 
 /* globals */
@@ -96,6 +102,73 @@ collect_tiled(const Workspace *ws, ManagedWindow **out, int maxout, int monid)
             && ws->wins[i].monitor == monid)
             out[n++] = &ws->wins[i];
     return n;
+}
+
+/* ---- animation ---- */
+
+static void tile_horizontal(void);
+
+static double
+ease_out_quad(double t)
+{
+    return t * (2.0 - t);
+}
+
+static void
+scroll_animate_to(int target)
+{
+    Workspace *ws = curws();
+    ws->scroll_offset = ws->scroll_target;
+    ws->scroll_target = target;
+    ws->scroll_animating = 1;
+    clock_gettime(CLOCK_MONOTONIC, &ws->anim_start);
+}
+
+static void
+animation_tick(void)
+{
+    Workspace *ws = curws();
+    if (!ws->scroll_animating) return;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    long elapsed_ms = (now.tv_sec - ws->anim_start.tv_sec) * 1000
+                    + (now.tv_nsec - ws->anim_start.tv_nsec) / 1000000;
+
+    double progress = (double)elapsed_ms / ANIM_DURATION_MS;
+    if (progress >= 1.0) progress = 1.0;
+
+    double eased = ease_out_quad(progress);
+
+    int start = ws->scroll_offset;
+    int delta = ws->scroll_target - start;
+
+    ws->scroll_offset = start + (int)(delta * eased + 0.5);
+
+    if (progress >= 1.0) {
+        ws->scroll_offset = ws->scroll_target;
+        ws->scroll_animating = 0;
+    }
+
+    tile_horizontal();
+}
+
+static int
+compute_timeout(void)
+{
+    Workspace *ws = curws();
+    if (!ws->scroll_animating) return -1;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    long elapsed_ms = (now.tv_sec - ws->anim_start.tv_sec) * 1000
+                    + (now.tv_nsec - ws->anim_start.tv_nsec) / 1000000;
+
+    long remaining = ANIM_DURATION_MS - elapsed_ms;
+    if (remaining <= 0) return 0;
+    return (int)remaining;
 }
 
 /* ---- bar strut support ---- */
@@ -394,6 +467,8 @@ set_scroll_visible(void *arg)
     }
 
     ws->scroll_offset = 0;
+    ws->scroll_target = 0;
+    ws->scroll_animating = 0;
     if (mon->horizontal_mode)
         tile_horizontal();
 }
@@ -415,20 +490,22 @@ move_horizontal(int forward)
 
     ww = mon->width / scroll_vis;
 
+    int target = ws->scroll_offset;
+
     if (forward) {
         total_w = ws->nwin * ww;
         max_scroll = total_w - mon->width;
         if (max_scroll < 0) max_scroll = 0;
-        ws->scroll_offset += ww;
-        if (ws->scroll_offset > max_scroll)
-            ws->scroll_offset = max_scroll;
+        target += ww;
+        if (target > max_scroll)
+            target = max_scroll;
     } else {
-        ws->scroll_offset -= ww;
-        if (ws->scroll_offset < 0)
-            ws->scroll_offset = 0;
+        target -= ww;
+        if (target < 0)
+            target = 0;
     }
 
-    tile_horizontal();
+    scroll_animate_to(target);
 }
 
 /* ---- tiling: toggle layout mode ---- */
@@ -709,17 +786,17 @@ focus_next(void)
         int ww = mon->width / scroll_vis;
         int first_visible = ws->scroll_offset / ww;
         int last_visible = first_visible + scroll_vis - 1;
-        int old_offset = ws->scroll_offset;
 
+        int new_offset = ws->scroll_offset;
         if (target > last_visible) {
-            ws->scroll_offset += ww;
+            new_offset = (target - scroll_vis + 1) * ww;
         } else if (target < first_visible) {
-            ws->scroll_offset -= ww;
-            if (ws->scroll_offset < 0) ws->scroll_offset = 0;
+            new_offset = target * ww;
+            if (new_offset < 0) new_offset = 0;
         }
 
-        if (ws->scroll_offset != old_offset)
-            tile_horizontal();
+        if (new_offset != ws->scroll_offset)
+            scroll_animate_to(new_offset);
     }
 }
 
@@ -759,17 +836,17 @@ focus_prev(void)
         int ww = mon->width / scroll_vis;
         int first_visible = ws->scroll_offset / ww;
         int last_visible = first_visible + scroll_vis - 1;
-        int old_offset = ws->scroll_offset;
 
+        int new_offset = ws->scroll_offset;
         if (target > last_visible) {
-            ws->scroll_offset += ww;
+            new_offset = (target - scroll_vis + 1) * ww;
         } else if (target < first_visible) {
-            ws->scroll_offset -= ww;
-            if (ws->scroll_offset < 0) ws->scroll_offset = 0;
+            new_offset = target * ww;
+            if (new_offset < 0) new_offset = 0;
         }
 
-        if (ws->scroll_offset != old_offset)
-            tile_horizontal();
+        if (new_offset != ws->scroll_offset)
+            scroll_animate_to(new_offset);
     }
 }
 
@@ -1157,18 +1234,39 @@ void
 run(void)
 {
     XEvent ev;
+    fd_set fds;
+    int xfd = ConnectionNumber(dpy);
 
-    while (running && !XNextEvent(dpy, &ev)) {
-        switch (ev.type) {
-        case MapRequest:       handle_map_request(&ev.xmaprequest); break;
-        case DestroyNotify:    handle_destroy_notify(&ev.xdestroywindow); break;
-        case UnmapNotify:      handle_unmap_notify(&ev.xunmap); break;
-        case ConfigureRequest: handle_configure_request(&ev.xconfigurerequest); break;
-        case EnterNotify:      handle_enter_notify(&ev.xcrossing); break;
-        case KeyPress:         handle_key_press(&ev.xkey); break;
-        case ButtonPress:      handle_button_press(&ev.xbutton); break;
-        default: break;
+    while (running) {
+        while (XPending(dpy)) {
+            XNextEvent(dpy, &ev);
+            switch (ev.type) {
+            case MapRequest:       handle_map_request(&ev.xmaprequest); break;
+            case DestroyNotify:    handle_destroy_notify(&ev.xdestroywindow); break;
+            case UnmapNotify:      handle_unmap_notify(&ev.xunmap); break;
+            case ConfigureRequest: handle_configure_request(&ev.xconfigurerequest); break;
+            case EnterNotify:      handle_enter_notify(&ev.xcrossing); break;
+            case KeyPress:         handle_key_press(&ev.xkey); break;
+            case ButtonPress:      handle_button_press(&ev.xbutton); break;
+            default: break;
+            }
         }
+
+        int timeout_ms = compute_timeout();
+        struct timeval tv, *tvp = NULL;
+
+        if (timeout_ms >= 0) {
+            tv.tv_sec  = timeout_ms / 1000;
+            tv.tv_usec = (timeout_ms % 1000) * 1000;
+            tvp = &tv;
+        }
+
+        FD_ZERO(&fds);
+        FD_SET(xfd, &fds);
+
+        select(xfd + 1, &fds, NULL, NULL, tvp);
+
+        animation_tick();
     }
 }
 

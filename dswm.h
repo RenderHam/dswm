@@ -35,6 +35,7 @@
 #define MAX_MASTER_VERT    0.9f
 #define MIN_SCROLL_VIS     1
 #define MAX_SCROLL_VIS     10
+#define ANIM_DURATION_MS   150
 
 /* modifier keys */
 #define MODKEY             Mod4Mask
