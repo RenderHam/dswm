@@ -83,6 +83,11 @@ static Atom atom_net_supported;
 static Atom atom_net_number_of_desktops;
 static Atom atom_net_active_window;
 static Atom atom_net_wm_name;
+static Atom atom_net_wm_window_type;
+static Atom atom_net_wm_type_desktop;
+static Atom atom_net_wm_type_dock;
+static Atom atom_net_wm_type_splash;
+static Atom atom_motif_wm_hints;
 
 /* ---- workspace helpers ---- */
 
@@ -731,6 +736,24 @@ manage_window(Window w)
     if (!XGetWindowAttributes(dpy, w, &wa)) return;
     if (wa.override_redirect) return;
 
+    /* skip desktop, dock, splash — let them exist as background surfaces */
+    Atom actual;
+    int fmt;
+    unsigned long n, remain;
+    unsigned char *data = NULL;
+    if (XGetWindowProperty(dpy, w, atom_net_wm_window_type, 0, 1, False,
+                           XA_ATOM, &actual, &fmt, &n, &remain,
+                           &data) == Success && data) {
+        Atom type = *(Atom *)data;
+        XFree(data);
+        if (type == atom_net_wm_type_desktop ||
+            type == atom_net_wm_type_dock ||
+            type == atom_net_wm_type_splash) {
+            XMapWindow(dpy, w);
+            return;
+        }
+    }
+
     memset(&mw, 0, sizeof(mw));
     mw.window = w;
     mw.x = wa.x;
@@ -1048,7 +1071,8 @@ setup_ewmh(void)
                         atom_net_current_desktop,
                         atom_net_active_window,
                         atom_net_wm_name,
-                    }, 4);
+                        atom_net_wm_window_type,
+                    }, 5);
 
     long ndesk = NUM_WORKSPACES;
     XChangeProperty(dpy, root, atom_net_number_of_desktops, XA_CARDINAL, 32,
@@ -1293,6 +1317,11 @@ cache_atoms(void)
     atom_net_number_of_desktops = XInternAtom(dpy, "_NET_NUMBER_OF_DESKTOPS", False);
     atom_net_active_window = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
     atom_net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
+    atom_net_wm_window_type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
+    atom_net_wm_type_desktop = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
+    atom_net_wm_type_dock = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
+    atom_net_wm_type_splash = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_SPLASH", False);
+    atom_motif_wm_hints = XInternAtom(dpy, "_MOTIF_WM_HINTS", False);
 }
 
 static void
