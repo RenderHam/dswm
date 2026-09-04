@@ -552,9 +552,10 @@ move_to_workspace(void *arg)
     win = *ws->focused;
 
     /* remove from current workspace */
+    int removed = -1;
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == win.window) {
-            tiled_remove(ws, win.window);
+            removed = i;
             memmove(&ws->wins[i], &ws->wins[i + 1],
                     (ws->nwin - i - 1) * sizeof(ManagedWindow));
             ws->nwin--;
@@ -564,27 +565,53 @@ move_to_workspace(void *arg)
     }
     if (!found) return;
 
+    /* rebuild tiled — wins memmove invalidated pointers */
+    ws->ntiled = 0;
+    for (i = 0; i < ws->nwin; i++) {
+        if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen)
+            tiled_add(ws, &ws->wins[i]);
+    }
+
     /* add to target workspace */
     Workspace *target = &spaces[idx];
+    int target_rebuilt = 0;
     if (target->nwin >= target->cap) {
         int newcap = target->cap ? target->cap * 2 : INITIAL_CAP;
         ManagedWindow *tmp = realloc(target->wins, newcap * sizeof(ManagedWindow));
         if (!tmp) { free(target->wins); target->wins = NULL; target->cap = 0; err(1, "realloc"); }
         target->wins = tmp;
         target->cap = newcap;
+        target_rebuilt = 1;
     }
     win.workspace = idx;
     target->wins[target->nwin++] = win;
     target->focused = &target->wins[target->nwin - 1];
 
-    /* update tiled list for target workspace */
-    if (!win.is_floating && !win.is_fullscreen)
+    /* rebuild target tiled if realloc moved array, else incremental */
+    if (target_rebuilt) {
+        target->ntiled = 0;
+        for (i = 0; i < target->nwin; i++) {
+            if (!target->wins[i].is_floating && !target->wins[i].is_fullscreen)
+                tiled_add(target, &target->wins[i]);
+        }
+    } else if (!win.is_floating && !win.is_fullscreen) {
         tiled_add(target, &target->wins[target->nwin - 1]);
+    }
 
     /* hide the moved window (it's on a non-active workspace now) */
     XUnmapWindow(dpy, win.window);
 
-    refocus(ws, NULL);
+    /* left neighbor on source workspace */
+    if (ws->nwin == 0) {
+        ws->focused = NULL;
+    } else {
+        int ni = removed - 1;
+        if (ni < 0) ni = 0;
+        if (ni >= ws->nwin) ni = ws->nwin - 1;
+        ws->focused = &ws->wins[ni];
+        update_border(ws->focused->window, 1);
+        XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
+    }
     retile();
 }
 
@@ -678,11 +705,16 @@ static void
 unmanage_window(Window w)
 {
     Workspace *ws = curws();
-    int i;
+    int i, removed = -1, focused_idx = -1;
+
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->focused && &ws->wins[i] == ws->focused)
+            focused_idx = i;
+    }
 
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == w) {
-            tiled_remove(ws, w);
+            removed = i;
             memmove(&ws->wins[i], &ws->wins[i + 1],
                     (ws->nwin - i - 1) * sizeof(ManagedWindow));
             ws->nwin--;
@@ -690,9 +722,32 @@ unmanage_window(Window w)
         }
     }
 
-    ws->focused = (ws->nwin > 0) ? &ws->wins[ws->nwin - 1] : NULL;
-    if (ws->focused)
+    if (removed == -1) return;
+
+    /* rebuild tiled — wins memmove invalidated pointers */
+    ws->ntiled = 0;
+    for (i = 0; i < ws->nwin; i++) {
+        if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen)
+            tiled_add(ws, &ws->wins[i]);
+    }
+
+    /* left neighbor of closed window */
+    if (ws->nwin == 0) {
+        ws->focused = NULL;
+    } else if (focused_idx == removed) {
+        int ni = removed - 1;
+        if (ni < 0) ni = 0;
+        if (ni >= ws->nwin) ni = ws->nwin - 1;
+        ws->focused = &ws->wins[ni];
         update_border(ws->focused->window, 1);
+        XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
+    } else if (focused_idx > removed) {
+        ws->focused = &ws->wins[focused_idx - 1];
+    } else if (focused_idx >= 0) {
+        ws->focused = &ws->wins[focused_idx];
+    } else {
+        ws->focused = NULL;
+    }
 
     retile_deferred();
 }
@@ -1024,7 +1079,17 @@ handle_configure_request(XConfigureRequestEvent *e)
 static void
 handle_enter_notify(XCrossingEvent *e)
 {
-    (void)e;
+    Workspace *ws = curws();
+    int i;
+
+    if (e->mode != NotifyNormal || e->detail == NotifyInferior) return;
+
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].window == e->window) {
+            refocus(ws, &ws->wins[i]);
+            break;
+        }
+    }
 }
 
 static void
@@ -1062,26 +1127,11 @@ handle_key_press(XKeyEvent *e)
 static void
 handle_button_press(XButtonEvent *e)
 {
-    Workspace *ws = curws();
-    int i;
-
-    /* Super+Shift+Wheel: scroll windows */
     if (e->state == (Mod4Mask | ShiftMask)) {
         if (e->button == Button4)
             move_horizontal(0);
         else if (e->button == Button5)
             move_horizontal(1);
-        return;
-    }
-
-    /* click-to-focus (Button1 only) */
-    if (e->button == Button1) {
-        for (i = 0; i < ws->nwin; i++) {
-            if (ws->wins[i].window == e->window) {
-                refocus(ws, &ws->wins[i]);
-                break;
-            }
-        }
     }
 }
 
