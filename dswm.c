@@ -24,6 +24,9 @@ struct ManagedWindow {
     int is_fullscreen;
     int workspace;
     int monitor;
+    float width_factor;
+    int is_fit;
+    float saved_factor;
     /* pre-fullscreen geometry */
     int pre_fs_x, pre_fs_y;
     int pre_fs_width, pre_fs_height;
@@ -50,6 +53,7 @@ struct Workspace {
     int nwin;
     int cap;
     ManagedWindow *focused;
+    int cam_x;
     /* incremental tiled list */
     ManagedWindow **tiled;
     int ntiled;
@@ -64,6 +68,7 @@ static int scrw, scrh;
 static int running = 1;
 static int cur_ws;
 static int retile_pending = 0;
+static int center_focused = CENTER_FOCUSED_DEFAULT;
 
 static Monitor mons[8];
 static int nmons;
@@ -209,38 +214,75 @@ tile_horizontal(void)
     Monitor *mon = curmon();
     int i;
     int usable_h, usable_w, x_start, y_start;
-    int win_w, win_h, col_w;
+    int win_h, col_w, win_w;
     int cam_x = 0;
-    int canvas_x;
+    int cur_x;
 
     if (ws->ntiled == 0) return;
 
     compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
-    col_w = usable_w / COLUMN_DIVISOR;
-    if (col_w < 1) col_w = 1;
-    win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-    if (win_w < 1) win_w = 1;
     win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
     if (win_h < 1) win_h = 1;
 
-    /* place each column on the infinite canvas */
+    /* place each column on the infinite canvas with variable width */
+    cur_x = x_start + GAP_OUTER;
     for (i = 0; i < ws->ntiled; i++) {
-        canvas_x = x_start + GAP_OUTER + i * col_w;
-        ws->tiled[i]->x = canvas_x;
+        float f = ws->tiled[i]->width_factor;
+        if (f < MIN_WIDTH_FACTOR) f = MIN_WIDTH_FACTOR;
+        if (f > MAX_WIDTH_FACTOR) f = MAX_WIDTH_FACTOR;
+        col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
+        if (col_w < MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH)
+            col_w = MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+        win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (win_w < 1) win_w = 1;
+
+        ws->tiled[i]->x = cur_x;
         ws->tiled[i]->y = y_start + GAP_OUTER;
         ws->tiled[i]->width = win_w;
         ws->tiled[i]->height = win_h;
+        cur_x += col_w;
     }
 
-    /* camera: center on focused window */
-    if (ws->focused) {
+    /* camera: center or edge-scroll */
+    int total_w = cur_x - x_start;
+    if (center_focused && ws->focused) {
         for (i = 0; i < ws->ntiled; i++) {
             if (ws->tiled[i] == ws->focused) {
-                cam_x = ws->tiled[i]->x - x_start - (usable_w - win_w) / 2;
+                cam_x = ws->tiled[i]->x - x_start - (usable_w - ws->tiled[i]->width) / 2 - GAP_OUTER;
                 break;
             }
         }
+        ws->cam_x = cam_x;
+    } else if (ws->focused) {
+        cam_x = ws->cam_x;
+        for (i = 0; i < ws->ntiled; i++) {
+            if (ws->tiled[i] == ws->focused) {
+                int col_w = ws->tiled[i]->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+                int left = ws->tiled[i]->x - x_start;
+                int right = left + col_w;
+                if (left < cam_x)
+                    cam_x = left;
+                else if (right > cam_x + usable_w)
+                    cam_x = right - usable_w;
+                break;
+            }
+        }
+        if (total_w <= usable_w)
+            cam_x = 0;
+        else {
+            if (cam_x < 0) cam_x = 0;
+            if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
+        }
+        ws->cam_x = cam_x;
+    } else {
+        cam_x = ws->cam_x;
+        if (total_w <= usable_w) cam_x = 0;
+        else {
+            if (cam_x < 0) cam_x = 0;
+            if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
+        }
+        ws->cam_x = cam_x;
     }
 
     /* project canvas → screen and move windows */
@@ -337,6 +379,63 @@ resize_master(void *arg)
     if (mon->master_factor > MAX_MASTER_VERT) mon->master_factor = MAX_MASTER_VERT;
 
     tile_windows();
+}
+
+static void toggle_fullscreen(void);
+
+static void
+resize_window(void *arg)
+{
+    Workspace *ws = curws();
+    ManagedWindow *w = ws->focused;
+    int dir = (int)(long)arg;
+    if (!w) return;
+
+    w->width_factor += dir * RESIZE_FACTOR_STEP;
+    if (w->width_factor < MIN_WIDTH_FACTOR) w->width_factor = MIN_WIDTH_FACTOR;
+    if (w->width_factor > MAX_WIDTH_FACTOR) w->width_factor = MAX_WIDTH_FACTOR;
+    w->is_fit = 0;
+
+    if (w->is_floating || w->is_fullscreen) {
+        int new_w = (int)(w->width * (1.0f + dir * RESIZE_FACTOR_STEP));
+        int new_h = (int)(w->height * (1.0f + dir * RESIZE_FACTOR_STEP));
+        if (new_w < MIN_WIN_DIM) new_w = MIN_WIN_DIM;
+        if (new_h < MIN_WIN_DIM) new_h = MIN_WIN_DIM;
+        if (new_w > scrw - 2 * GAP_OUTER) new_w = scrw - 2 * GAP_OUTER;
+        if (new_h > scrh - 2 * GAP_OUTER) new_h = scrh - 2 * GAP_OUTER;
+        w->width = new_w;
+        w->height = new_h;
+        w->x = scrw / 2 - new_w / 2;
+        w->y = scrh / 2 - new_h / 2;
+        XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
+        XFlush(dpy);
+    } else {
+        tile_horizontal();
+    }
+}
+
+static void
+fit_window(void)
+{
+    Workspace *ws = curws();
+    ManagedWindow *w = ws->focused;
+    if (!w) return;
+
+    if (w->is_floating || w->is_fullscreen) {
+        toggle_fullscreen();
+        return;
+    }
+
+    if (!w->is_fit) {
+        w->saved_factor = w->width_factor;
+        w->width_factor = (float)COLUMN_DIVISOR;
+        if (w->width_factor > MAX_WIDTH_FACTOR) w->width_factor = MAX_WIDTH_FACTOR;
+        w->is_fit = 1;
+    } else {
+        w->width_factor = w->saved_factor;
+        w->is_fit = 0;
+    }
+    tile_horizontal();
 }
 
 static void
@@ -440,6 +539,13 @@ move_horizontal(int forward)
 }
 
 /* ---- tiling: toggle layout mode ---- */
+
+static void
+toggle_center_focus(void)
+{
+    center_focused = !center_focused;
+    retile();
+}
 
 static void
 toggle_layout(void)
@@ -637,6 +743,8 @@ manage_window(Window w)
     mw.height = wa.height;
     mw.workspace = cur_ws;
     mw.monitor = curmon()->id;
+    mw.width_factor = 1.0f;
+    mw.saved_factor = 1.0f;
 
     /* apply window rules */
     if (XGetClassHint(dpy, w, &ch)) {
@@ -1110,11 +1218,14 @@ handle_key_press(XKeyEvent *e)
             case SWAP_NEXT:          swap_next(); break;
             case SWAP_PREV:          swap_prev(); break;
             case RESIZE_MASTER:      resize_master((void *)(long)keys[i].arg.i); break;
+            case RESIZE_WINDOW:      resize_window((void *)(long)keys[i].arg.i); break;
             case SCROLL_LEFT:        move_horizontal(0); break;
             case SCROLL_RIGHT:       move_horizontal(1); break;
             case TOGGLE_LAYOUT:      toggle_layout(); break;
             case TOGGLE_FULLSCREEN:  toggle_fullscreen(); break;
             case TOGGLE_FLOAT:       toggle_float(); break;
+            case FIT_WINDOW:         fit_window(); break;
+            case TOGGLE_CENTER_FOCUS: toggle_center_focus(); break;
             case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
             case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
             case FOCUS_MONITOR:      focus_monitor((void *)(long)keys[i].arg.i); break;
@@ -1226,6 +1337,7 @@ init(void)
         spaces[i].nwin = 0;
         spaces[i].cap = 0;
         spaces[i].focused = NULL;
+        spaces[i].cam_x = 0;
         spaces[i].tiled = NULL;
         spaces[i].ntiled = 0;
         spaces[i].tiled_cap = 0;

@@ -19,10 +19,15 @@
 #define GAP_INNER          10       /* px gap between adjacent tiled windows (per side) */
 
 #define COLUMN_DIVISOR     2        /* windows per viewport in scroll mode */
-#define RESIZE_STEP        60
+#define RESIZE_STEP        50
+#define RESIZE_FACTOR_STEP 0.1f
+#define MIN_WIDTH_FACTOR   0.3f
+#define MAX_WIDTH_FACTOR   3.0f
 
 #define BAR_POSITION       0       /* 0 = top, 1 = bottom */
 #define BAR_HEIGHT         0
+
+#define CENTER_FOCUSED_DEFAULT 0
 
 #define USE_XINERAMA       1
 
@@ -54,9 +59,9 @@ enum {
     SPAWN, CLOSE, QUIT,
     FOCUS_NEXT, FOCUS_PREV,
     SWAP_PREV, SWAP_NEXT,
-    RESIZE_MASTER,
+    RESIZE_MASTER, RESIZE_WINDOW,
     SCROLL_LEFT, SCROLL_RIGHT,
-    TOGGLE_LAYOUT, TOGGLE_FULLSCREEN, TOGGLE_FLOAT,
+    TOGGLE_LAYOUT, TOGGLE_FULLSCREEN, TOGGLE_FLOAT, FIT_WINDOW, TOGGLE_CENTER_FOCUS,
     FOCUS_MONITOR,
     SWITCH_WORKSPACE, MOVE_TO_WORKSPACE,
 };
@@ -104,8 +109,12 @@ static Key keys[] __attribute__((unused)) = {
     { MODKEY|SHTKEY,    XK_l,      SWAP_NEXT,      { 0 } },
 
     /* resize master */
-    { MODKEY,           XK_h,      RESIZE_MASTER,  { .i = -RESIZE_STEP } },
-    { MODKEY,           XK_l,      RESIZE_MASTER,  { .i = +RESIZE_STEP } },
+    { MODKEY|ControlMask, XK_h,    RESIZE_MASTER,  { .i = -RESIZE_STEP } },
+    { MODKEY|ControlMask, XK_l,    RESIZE_MASTER,  { .i = +RESIZE_STEP } },
+
+    /* resize window (factor) */
+    { MODKEY|Mod1Mask,  XK_h,      RESIZE_WINDOW,  { .i = -1 } },
+    { MODKEY|Mod1Mask,  XK_l,      RESIZE_WINDOW,  { .i = +1 } },
 
     /* scroll windows */
     { MODKEY,           XK_Left,   SCROLL_LEFT,    { 0 } },
@@ -114,6 +123,8 @@ static Key keys[] __attribute__((unused)) = {
     /* toggle states */
     { MODKEY,           XK_t,      TOGGLE_LAYOUT,  { 0 } },
     { MODKEY,           XK_f,      TOGGLE_FULLSCREEN, { 0 } },
+    { MODKEY,           XK_m,      FIT_WINDOW,     { 0 } },
+    { MODKEY,           XK_c,      TOGGLE_CENTER_FOCUS, { 0 } },
     { MODKEY|SHTKEY,    XK_space,  TOGGLE_FLOAT,   { 0 } },
 
     /* focus monitor */
