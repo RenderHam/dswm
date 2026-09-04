@@ -258,11 +258,13 @@ tile_horizontal(void)
 
     /* camera: center or edge-scroll */
     int total_w = cur_x - x_start;
+    int centered = 0;
     if (center_focused && ws->focused) {
         for (i = 0; i < ws->ntiled; i++) {
             if (ws->tiled[i] == ws->focused) {
                 int outer = ws->tiled[i]->width + 2 * BORDER_WIDTH;
                 cam_x = ws->tiled[i]->x - x_start - (usable_w - outer) / 2;
+                centered = 1;
                 break;
             }
         }
@@ -284,12 +286,14 @@ tile_horizontal(void)
         cam_x = ws->cam_x;
     }
 
-    /* clamp camera */
-    if (total_w <= usable_w)
-        cam_x = 0;
-    else {
-        if (cam_x < 0) cam_x = 0;
-        if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
+    /* clamp camera (skip for center-focus: camera is computed exactly) */
+    if (!centered) {
+        if (total_w <= usable_w)
+            cam_x = 0;
+        else {
+            if (cam_x < 0) cam_x = 0;
+            if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
+        }
     }
     ws->cam_x = cam_x;
 
@@ -778,11 +782,13 @@ manage_window(Window w)
 }
 
 static void
-unmanage_window(Window w)
+unmanage_window(Window w, int force)
 {
     int i, j;
+    int lo = force ? 0 : cur_ws;
+    int hi = force ? NUM_WORKSPACES : cur_ws + 1;
 
-    for (j = 0; j < NUM_WORKSPACES; j++) {
+    for (j = lo; j < hi; j++) {
         Workspace *ws = &spaces[j];
         int removed = -1, focused_idx = -1;
 
@@ -1112,13 +1118,13 @@ handle_map_request(XMapRequestEvent *e)
 static void
 handle_destroy_notify(XDestroyWindowEvent *e)
 {
-    unmanage_window(e->window);
+    unmanage_window(e->window, 1);
 }
 
 static void
 handle_unmap_notify(XUnmapEvent *e)
 {
-    unmanage_window(e->window);
+    unmanage_window(e->window, 0);
 }
 
 static void
