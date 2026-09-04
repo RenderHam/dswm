@@ -1,5 +1,4 @@
 #include "dswm.h"
-#include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
 #include <X11/extensions/Xinerama.h>
@@ -11,7 +10,6 @@
 #include <err.h>
 
 /* macros */
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define NELEM(x)  (sizeof(x) / sizeof(x[0]))
 
@@ -106,22 +104,24 @@ curmon(void)
 
 /* ---- tiled list helpers ---- */
 
-static void
+static int
 tiled_ensure_cap(Workspace *ws)
 {
     if (ws->ntiled >= ws->tiled_cap) {
         int newcap = ws->tiled_cap ? ws->tiled_cap * 2 : INITIAL_CAP;
         ManagedWindow **tmp = realloc(ws->tiled, newcap * sizeof(ManagedWindow *));
-        if (!tmp) return;
+        if (!tmp) return 0;
         ws->tiled = tmp;
         ws->tiled_cap = newcap;
     }
+    return 1;
 }
 
 static void
 tiled_add(Workspace *ws, ManagedWindow *mw)
 {
-    tiled_ensure_cap(ws);
+    if (!tiled_ensure_cap(ws))
+        err(1, "tiled_add: realloc");
     ws->tiled[ws->ntiled++] = mw;
 }
 
@@ -136,6 +136,17 @@ tiled_remove(Workspace *ws, Window w)
             ws->ntiled--;
             return;
         }
+    }
+}
+
+static void
+rebuild_tiled(Workspace *ws)
+{
+    int i;
+    ws->ntiled = 0;
+    for (i = 0; i < ws->nwin; i++) {
+        if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen)
+            tiled_add(ws, &ws->wins[i]);
     }
 }
 
@@ -255,7 +266,6 @@ tile_horizontal(void)
                 break;
             }
         }
-        ws->cam_x = cam_x;
     } else if (ws->focused) {
         cam_x = ws->cam_x;
         for (i = 0; i < ws->ntiled; i++) {
@@ -270,22 +280,18 @@ tile_horizontal(void)
                 break;
             }
         }
-        if (total_w <= usable_w)
-            cam_x = 0;
-        else {
-            if (cam_x < 0) cam_x = 0;
-            if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
-        }
-        ws->cam_x = cam_x;
     } else {
         cam_x = ws->cam_x;
-        if (total_w <= usable_w) cam_x = 0;
-        else {
-            if (cam_x < 0) cam_x = 0;
-            if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
-        }
-        ws->cam_x = cam_x;
     }
+
+    /* clamp camera */
+    if (total_w <= usable_w)
+        cam_x = 0;
+    else {
+        if (cam_x < 0) cam_x = 0;
+        if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
+    }
+    ws->cam_x = cam_x;
 
     /* project canvas → screen and move windows */
     for (i = 0; i < ws->ntiled; i++) {
@@ -673,38 +679,22 @@ move_to_workspace(void *arg)
     }
     if (!found) return;
 
-    /* rebuild tiled — wins memmove invalidated pointers */
-    ws->ntiled = 0;
-    for (i = 0; i < ws->nwin; i++) {
-        if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen)
-            tiled_add(ws, &ws->wins[i]);
-    }
+    rebuild_tiled(ws);
 
     /* add to target workspace */
     Workspace *target = &spaces[idx];
-    int target_rebuilt = 0;
     if (target->nwin >= target->cap) {
         int newcap = target->cap ? target->cap * 2 : INITIAL_CAP;
         ManagedWindow *tmp = realloc(target->wins, newcap * sizeof(ManagedWindow));
-        if (!tmp) { free(target->wins); target->wins = NULL; target->cap = 0; err(1, "realloc"); }
+        if (!tmp) err(1, "realloc");
         target->wins = tmp;
         target->cap = newcap;
-        target_rebuilt = 1;
     }
     win.workspace = idx;
     target->wins[target->nwin++] = win;
     target->focused = &target->wins[target->nwin - 1];
 
-    /* rebuild target tiled if realloc moved array, else incremental */
-    if (target_rebuilt) {
-        target->ntiled = 0;
-        for (i = 0; i < target->nwin; i++) {
-            if (!target->wins[i].is_floating && !target->wins[i].is_fullscreen)
-                tiled_add(target, &target->wins[i]);
-        }
-    } else if (!win.is_floating && !win.is_fullscreen) {
-        tiled_add(target, &target->wins[target->nwin - 1]);
-    }
+    rebuild_tiled(target);
 
     /* hide the moved window (it's on a non-active workspace now) */
     XUnmapWindow(dpy, win.window);
@@ -763,41 +753,17 @@ manage_window(Window w)
     if (ws->nwin >= ws->cap) {
         int newcap = ws->cap ? ws->cap * 2 : INITIAL_CAP;
         ManagedWindow *tmp = realloc(ws->wins, newcap * sizeof(ManagedWindow));
-        if (!tmp) { free(ws->wins); ws->wins = NULL; ws->cap = 0; err(1, "realloc"); }
+        if (!tmp) err(1, "realloc");
         ws->wins = tmp;
         ws->cap = newcap;
     }
 
-    /* insert after focused window, or append if nothing focused */
-    int focused_idx = -1;
-    int insert_idx;
-    if (ws->focused) {
-        for (i = 0; i < ws->nwin; i++) {
-            if (&ws->wins[i] == ws->focused) {
-                focused_idx = i;
-                break;
-            }
-        }
-    }
-    if (focused_idx >= 0) {
-        insert_idx = focused_idx + 1;
-        memmove(&ws->wins[insert_idx + 1], &ws->wins[insert_idx],
-                (ws->nwin - insert_idx) * sizeof(ManagedWindow));
-        ws->wins[insert_idx] = mw;
-        ws->nwin++;
-    } else {
-        insert_idx = ws->nwin;
-        ws->wins[ws->nwin++] = mw;
-    }
+    int insert_idx = ws->nwin;
+    ws->wins[ws->nwin++] = mw;
 
-    /* rebuild tiled list — memmove invalidated all pointers */
-    ws->ntiled = 0;
-    for (i = 0; i < ws->nwin; i++) {
-        if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen)
-            tiled_add(ws, &ws->wins[i]);
-    }
+    rebuild_tiled(ws);
 
-    XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask);
+    XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask | PropertyChangeMask);
     XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
     refocus(ws, &ws->wins[insert_idx]);
 
@@ -814,49 +780,50 @@ manage_window(Window w)
 static void
 unmanage_window(Window w)
 {
-    Workspace *ws = curws();
-    int i, removed = -1, focused_idx = -1;
+    int i, j;
 
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->focused && &ws->wins[i] == ws->focused)
-            focused_idx = i;
-    }
+    for (j = 0; j < NUM_WORKSPACES; j++) {
+        Workspace *ws = &spaces[j];
+        int removed = -1, focused_idx = -1;
 
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].window == w) {
-            removed = i;
-            memmove(&ws->wins[i], &ws->wins[i + 1],
-                    (ws->nwin - i - 1) * sizeof(ManagedWindow));
-            ws->nwin--;
-            break;
+        for (i = 0; i < ws->nwin; i++) {
+            if (ws->focused && &ws->wins[i] == ws->focused)
+                focused_idx = i;
         }
-    }
 
-    if (removed == -1) return;
+        for (i = 0; i < ws->nwin; i++) {
+            if (ws->wins[i].window == w) {
+                removed = i;
+                memmove(&ws->wins[i], &ws->wins[i + 1],
+                        (ws->nwin - i - 1) * sizeof(ManagedWindow));
+                ws->nwin--;
+                break;
+            }
+        }
 
-    /* rebuild tiled — wins memmove invalidated pointers */
-    ws->ntiled = 0;
-    for (i = 0; i < ws->nwin; i++) {
-        if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen)
-            tiled_add(ws, &ws->wins[i]);
-    }
+        if (removed == -1) continue;
 
-    /* left neighbor of closed window */
-    if (ws->nwin == 0) {
-        ws->focused = NULL;
-    } else if (focused_idx == removed) {
-        int ni = removed - 1;
-        if (ni < 0) ni = 0;
-        if (ni >= ws->nwin) ni = ws->nwin - 1;
-        ws->focused = &ws->wins[ni];
-        update_border(ws->focused->window, 1);
-        XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
-    } else if (focused_idx > removed) {
-        ws->focused = &ws->wins[focused_idx - 1];
-    } else if (focused_idx >= 0) {
-        ws->focused = &ws->wins[focused_idx];
-    } else {
-        ws->focused = NULL;
+        rebuild_tiled(ws);
+
+        /* focus logic only for the current workspace */
+        if (j == cur_ws) {
+            if (ws->nwin == 0) {
+                ws->focused = NULL;
+            } else if (focused_idx == removed) {
+                int ni = removed - 1;
+                if (ni < 0) ni = 0;
+                if (ni >= ws->nwin) ni = ws->nwin - 1;
+                ws->focused = &ws->wins[ni];
+                update_border(ws->focused->window, 1);
+                XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
+            } else if (focused_idx > removed) {
+                ws->focused = &ws->wins[focused_idx - 1];
+            } else if (focused_idx >= 0) {
+                ws->focused = &ws->wins[focused_idx];
+            } else {
+                ws->focused = NULL;
+            }
+        }
     }
 
     retile_deferred();
