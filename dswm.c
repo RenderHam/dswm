@@ -516,7 +516,8 @@ swap_impl(int delta)
 
     if (cur_idx == -1 || ws->wins[cur_idx].is_floating) return;
 
-    swap_idx = (cur_idx + delta + ws->nwin) % ws->nwin;
+    swap_idx = cur_idx + delta;
+    if (swap_idx < 0 || swap_idx >= ws->nwin) return;
 
     /* swap */
     tmp = ws->wins[cur_idx];
@@ -667,15 +668,39 @@ manage_window(Window w)
         ws->wins = tmp;
         ws->cap = newcap;
     }
-    ws->wins[ws->nwin++] = mw;
 
-    /* update incremental tiled list */
-    if (!mw.is_floating && !mw.is_fullscreen)
-        tiled_add(ws, &ws->wins[ws->nwin - 1]);
+    /* insert after focused window, or append if nothing focused */
+    int focused_idx = -1;
+    int insert_idx;
+    if (ws->focused) {
+        for (i = 0; i < ws->nwin; i++) {
+            if (&ws->wins[i] == ws->focused) {
+                focused_idx = i;
+                break;
+            }
+        }
+    }
+    if (focused_idx >= 0) {
+        insert_idx = focused_idx + 1;
+        memmove(&ws->wins[insert_idx + 1], &ws->wins[insert_idx],
+                (ws->nwin - insert_idx) * sizeof(ManagedWindow));
+        ws->wins[insert_idx] = mw;
+        ws->nwin++;
+    } else {
+        insert_idx = ws->nwin;
+        ws->wins[ws->nwin++] = mw;
+    }
+
+    /* rebuild tiled list — memmove invalidated all pointers */
+    ws->ntiled = 0;
+    for (i = 0; i < ws->nwin; i++) {
+        if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen)
+            tiled_add(ws, &ws->wins[i]);
+    }
 
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask);
     XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
-    refocus(ws, &ws->wins[ws->nwin - 1]);
+    refocus(ws, &ws->wins[insert_idx]);
 
     /* only map if on the current workspace */
     if (mw.workspace == cur_ws)
