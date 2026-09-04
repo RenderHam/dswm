@@ -1105,6 +1105,7 @@ grab_keys(void)
     unsigned int mods[] = { 0, LockMask, Mod2Mask, LockMask | Mod2Mask };
 
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
+    XUngrabButton(dpy, AnyButton, AnyModifier, root);
 
     for (i = 0; i < NELEM(keys); i++) {
         code = XKeysymToKeycode(dpy, keys[i].sym);
@@ -1114,11 +1115,13 @@ grab_keys(void)
                      True, GrabModeAsync, GrabModeAsync);
     }
 
-    /* grab mouse wheel for Super+Shift+scroll */
-    XGrabButton(dpy, Button4, Mod4Mask | ShiftMask, root,
-                True, GrabModeAsync, GrabModeAsync, 0, 0, None);
-    XGrabButton(dpy, Button5, Mod4Mask | ShiftMask, root,
-                True, GrabModeAsync, GrabModeAsync, 0, 0, None);
+    /* grab mouse wheel for Super+Shift+scroll (with Caps/NumLock variants) */
+    for (j = 0; j < NELEM(mods); j++) {
+        XGrabButton(dpy, Button4, Mod4Mask | ShiftMask | mods[j], root,
+                    True, GrabModeAsync, GrabModeAsync, 0, 0, None);
+        XGrabButton(dpy, Button5, Mod4Mask | ShiftMask | mods[j], root,
+                    True, GrabModeAsync, GrabModeAsync, 0, 0, None);
+    }
 }
 
 /* ---- error handler (ignore X errors) ---- */
@@ -1240,7 +1243,7 @@ handle_key_press(XKeyEvent *e)
 static void
 handle_button_press(XButtonEvent *e)
 {
-    if (e->state == (Mod4Mask | ShiftMask)) {
+    if ((e->state & (Mod4Mask | ShiftMask)) == (Mod4Mask | ShiftMask)) {
         if (e->button == Button4)
             move_horizontal(0);
         else if (e->button == Button5)
@@ -1384,6 +1387,7 @@ cleanup(void)
         free(spaces[i].tiled);
     }
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
+    XUngrabButton(dpy, AnyButton, AnyModifier, root);
     XCloseDisplay(dpy);
 }
 
