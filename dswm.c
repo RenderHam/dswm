@@ -226,7 +226,7 @@ tile_horizontal(void)
     if (win_h < 1) win_h = 1;
 
     /* place each column on the infinite canvas with variable width */
-    cur_x = x_start + GAP_OUTER;
+    cur_x = x_start;
     for (i = 0; i < ws->ntiled; i++) {
         float f = ws->tiled[i]->width_factor;
         if (f < MIN_WIDTH_FACTOR) f = MIN_WIDTH_FACTOR;
@@ -234,10 +234,11 @@ tile_horizontal(void)
         col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
         if (col_w < MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH)
             col_w = MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+        if (col_w > usable_w) col_w = usable_w;
         win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
         if (win_w < 1) win_w = 1;
 
-        ws->tiled[i]->x = cur_x;
+        ws->tiled[i]->x = cur_x + GAP_OUTER;
         ws->tiled[i]->y = y_start + GAP_OUTER;
         ws->tiled[i]->width = win_w;
         ws->tiled[i]->height = win_h;
@@ -249,7 +250,8 @@ tile_horizontal(void)
     if (center_focused && ws->focused) {
         for (i = 0; i < ws->ntiled; i++) {
             if (ws->tiled[i] == ws->focused) {
-                cam_x = ws->tiled[i]->x - x_start - (usable_w - ws->tiled[i]->width) / 2 - GAP_OUTER;
+                int outer = ws->tiled[i]->width + 2 * BORDER_WIDTH;
+                cam_x = ws->tiled[i]->x - x_start - (usable_w - outer) / 2;
                 break;
             }
         }
@@ -258,13 +260,13 @@ tile_horizontal(void)
         cam_x = ws->cam_x;
         for (i = 0; i < ws->ntiled; i++) {
             if (ws->tiled[i] == ws->focused) {
-                int col_w = ws->tiled[i]->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
-                int left = ws->tiled[i]->x - x_start;
-                int right = left + col_w;
-                if (left < cam_x)
-                    cam_x = left;
-                else if (right > cam_x + usable_w)
-                    cam_x = right - usable_w;
+                int col = ws->tiled[i]->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+                int col_left = ws->tiled[i]->x - x_start - GAP_OUTER;
+                int col_right = col_left + col;
+                if (col_left < cam_x)
+                    cam_x = col_left;
+                else if (col_right > cam_x + usable_w)
+                    cam_x = col_right - usable_w;
                 break;
             }
         }
