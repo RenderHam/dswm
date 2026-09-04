@@ -39,7 +39,6 @@ struct Monitor {
     int current_workspace;
     float master_factor;
     int horizontal_mode;
-    int scroll_windows_visible;
     /* cached struts */
     int strut_top, strut_bottom, strut_left, strut_right;
     int strut_valid;
@@ -51,7 +50,6 @@ struct Workspace {
     int nwin;
     int cap;
     ManagedWindow *focused;
-    int scroll_offset;
     /* incremental tiled list */
     ManagedWindow **tiled;
     int ntiled;
@@ -202,7 +200,7 @@ compute_usable_area(Monitor *mon, int *usable_w, int *usable_h,
     if (*usable_w < MIN_WIN_DIM) *usable_w = mon->width;
 }
 
-/* ---- tiling: horizontal scroll layout ---- */
+/* ---- tiling: horizontal scroll layout (infinite canvas) ---- */
 
 static void
 tile_horizontal(void)
@@ -211,52 +209,45 @@ tile_horizontal(void)
     Monitor *mon = curmon();
     int i;
     int usable_h, usable_w, x_start, y_start;
-    int scroll_vis, ww;
-    int all_fit;
-    int x_pos, y_pos, win_w, win_h;
+    int win_w, win_h, col_w;
+    int cam_x = 0;
+    int canvas_x;
 
     if (ws->ntiled == 0) return;
 
     compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
-    scroll_vis = mon->scroll_windows_visible;
-    if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
+    col_w = usable_w / COLUMN_DIVISOR;
+    if (col_w < 1) col_w = 1;
+    win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+    if (win_w < 1) win_w = 1;
+    win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+    if (win_h < 1) win_h = 1;
 
-    all_fit = (ws->ntiled <= scroll_vis);
-
-    if (all_fit) {
-        ww = usable_w / ws->ntiled;
-    } else {
-        ww = usable_w / scroll_vis;
-    }
-    if (ww < MIN_WIN_W) ww = MIN_WIN_W;
-    if (ww > usable_w) ww = usable_w;
-
-    if (!all_fit) {
-        int max_off = ws->ntiled * ww - usable_w;
-        if (max_off < 0) max_off = 0;
-        if (ws->scroll_offset < 0) ws->scroll_offset = 0;
-        if (ws->scroll_offset > max_off) ws->scroll_offset = max_off;
-    } else {
-        ws->scroll_offset = 0;
-    }
-
+    /* place each column on the infinite canvas */
     for (i = 0; i < ws->ntiled; i++) {
-        int scroll_off = all_fit ? 0 : ws->scroll_offset;
-        x_pos = x_start + i * ww - scroll_off + GAP_OUTER;
-        y_pos = y_start + GAP_OUTER;
-        win_w = ww - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        if (win_w < 1) win_w = 1;
-        if (win_h < 1) win_h = 1;
-
-        ws->tiled[i]->x = x_pos;
-        ws->tiled[i]->y = y_pos;
+        canvas_x = x_start + GAP_OUTER + i * col_w;
+        ws->tiled[i]->x = canvas_x;
+        ws->tiled[i]->y = y_start + GAP_OUTER;
         ws->tiled[i]->width = win_w;
         ws->tiled[i]->height = win_h;
+    }
 
+    /* camera: center on focused window */
+    if (ws->focused) {
+        for (i = 0; i < ws->ntiled; i++) {
+            if (ws->tiled[i] == ws->focused) {
+                cam_x = ws->tiled[i]->x - x_start - (usable_w - win_w) / 2;
+                break;
+            }
+        }
+    }
+
+    /* project canvas → screen and move windows */
+    for (i = 0; i < ws->ntiled; i++) {
+        int screen_x = ws->tiled[i]->x - cam_x;
         XMoveResizeWindow(dpy, ws->tiled[i]->window,
-                          ws->tiled[i]->x, ws->tiled[i]->y,
+                          screen_x, ws->tiled[i]->y,
                           ws->tiled[i]->width, ws->tiled[i]->height);
     }
 
@@ -416,61 +407,33 @@ focus_monitor(void *arg)
     update_ewmh_current_desktop();
 }
 
-/* ---- tiling: set scroll_visible ---- */
-
-static void
-set_scroll_visible(void *arg)
-{
-    int val = (int)(long)arg;
-    Monitor *mon = curmon();
-    Workspace *ws = curws();
-
-    /* positive = absolute set, negative = relative adjust */
-    if (val >= 0) {
-        if (val < MIN_SCROLL_VIS) val = MIN_SCROLL_VIS;
-        if (val > MAX_SCROLL_VIS) val = MAX_SCROLL_VIS;
-        mon->scroll_windows_visible = val;
-    } else {
-        mon->scroll_windows_visible += val;
-        if (mon->scroll_windows_visible < MIN_SCROLL_VIS)
-            mon->scroll_windows_visible = MIN_SCROLL_VIS;
-        if (mon->scroll_windows_visible > MAX_SCROLL_VIS)
-            mon->scroll_windows_visible = MAX_SCROLL_VIS;
-    }
-
-    ws->scroll_offset = 0;
-    if (mon->horizontal_mode)
-        tile_horizontal();
-}
-
-/* ---- tiling: scroll left/right ---- */
+/* ---- tiling: scroll left/right (camera) ---- */
 
 static void
 move_horizontal(int forward)
 {
-    Monitor *mon = curmon();
     Workspace *ws = curws();
-    int scroll_vis, ww, total_w, max_scroll;
+    Monitor *mon = curmon();
+    int idx = -1;
+    int i;
 
     if (!mon->horizontal_mode) return;
-    if (ws->nwin == 0) return;
+    if (ws->ntiled == 0) return;
 
-    scroll_vis = mon->scroll_windows_visible;
-    if (scroll_vis < 1) scroll_vis = 1;
-
-    ww = mon->width / scroll_vis;
+    for (i = 0; i < ws->ntiled; i++) {
+        if (ws->tiled[i] == ws->focused) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == -1) idx = 0;
 
     if (forward) {
-        total_w = ws->nwin * ww;
-        max_scroll = total_w - mon->width;
-        if (max_scroll < 0) max_scroll = 0;
-        ws->scroll_offset += ww;
-        if (ws->scroll_offset > max_scroll)
-            ws->scroll_offset = max_scroll;
+        if (idx + 1 >= ws->ntiled) return;
+        refocus(ws, ws->tiled[idx + 1]);
     } else {
-        ws->scroll_offset -= ww;
-        if (ws->scroll_offset < 0)
-            ws->scroll_offset = 0;
+        if (idx - 1 < 0) return;
+        refocus(ws, ws->tiled[idx - 1]);
     }
 
     tile_horizontal();
@@ -482,10 +445,8 @@ static void
 toggle_layout(void)
 {
     Monitor *mon = curmon();
-    Workspace *ws = curws();
 
     mon->horizontal_mode = !mon->horizontal_mode;
-    ws->scroll_offset = 0;
 
     if (mon->horizontal_mode) {
         mon->master_factor = 1.0f;
@@ -527,6 +488,7 @@ swap_impl(int delta)
     retile_deferred();
 
     ws->focused = &ws->wins[swap_idx];
+    refocus(ws, ws->focused);
 }
 
 static void
@@ -706,20 +668,10 @@ manage_window(Window w)
     if (mw.workspace == cur_ws)
         XMapWindow(dpy, w);
 
-    if (curmon()->horizontal_mode) {
-        Monitor *mon = curmon();
-        int scroll_vis = mon->scroll_windows_visible;
-        if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
-        if (ws->nwin > scroll_vis) {
-            int ww = mon->width / scroll_vis;
-            int new_off = (ws->nwin - scroll_vis) * ww;
-            if (new_off > ws->scroll_offset)
-                ws->scroll_offset = new_off;
-        }
+    if (curmon()->horizontal_mode)
         tile_horizontal();
-    } else {
+    else
         tile_windows();
-    }
 }
 
 static void
@@ -780,25 +732,8 @@ focus_next(void)
         count++;
     }
 
-    /* auto-scroll if the new focus is off-screen */
-    if (mon->horizontal_mode && ntiled > mon->scroll_windows_visible) {
-        int scroll_vis = mon->scroll_windows_visible;
-        if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
-        int ww = mon->width / scroll_vis;
-        int first_visible = ws->scroll_offset / ww;
-        int last_visible = first_visible + scroll_vis - 1;
-        int old_offset = ws->scroll_offset;
-
-        if (target > last_visible) {
-            ws->scroll_offset += ww;
-        } else if (target < first_visible) {
-            ws->scroll_offset -= ww;
-            if (ws->scroll_offset < 0) ws->scroll_offset = 0;
-        }
-
-        if (ws->scroll_offset != old_offset)
-            tile_horizontal();
-    }
+    if (mon->horizontal_mode)
+        tile_horizontal();
 }
 
 static void
@@ -831,24 +766,8 @@ focus_prev(void)
         count++;
     }
 
-    if (mon->horizontal_mode && ntiled > mon->scroll_windows_visible) {
-        int scroll_vis = mon->scroll_windows_visible;
-        if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
-        int ww = mon->width / scroll_vis;
-        int first_visible = ws->scroll_offset / ww;
-        int last_visible = first_visible + scroll_vis - 1;
-        int old_offset = ws->scroll_offset;
-
-        if (target > last_visible) {
-            ws->scroll_offset += ww;
-        } else if (target < first_visible) {
-            ws->scroll_offset -= ww;
-            if (ws->scroll_offset < 0) ws->scroll_offset = 0;
-        }
-
-        if (ws->scroll_offset != old_offset)
-            tile_horizontal();
-    }
+    if (mon->horizontal_mode)
+        tile_horizontal();
 }
 
 /* ---- close/quit ---- */
@@ -1029,6 +948,12 @@ grab_keys(void)
             XGrabKey(dpy, code, keys[i].mod | mods[j], root,
                      True, GrabModeAsync, GrabModeAsync);
     }
+
+    /* grab mouse wheel for Super+Shift+scroll */
+    XGrabButton(dpy, Button4, Mod4Mask | ShiftMask, root,
+                True, GrabModeAsync, GrabModeAsync, 0, 0, None);
+    XGrabButton(dpy, Button5, Mod4Mask | ShiftMask, root,
+                True, GrabModeAsync, GrabModeAsync, 0, 0, None);
 }
 
 /* ---- error handler (ignore X errors) ---- */
@@ -1099,17 +1024,7 @@ handle_configure_request(XConfigureRequestEvent *e)
 static void
 handle_enter_notify(XCrossingEvent *e)
 {
-    Workspace *ws = curws();
-    int i;
-
-    if (e->mode != NotifyNormal || e->detail == NotifyInferior) return;
-
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].window == e->window) {
-            refocus(ws, &ws->wins[i]);
-            break;
-        }
-    }
+    (void)e;
 }
 
 static void
@@ -1138,9 +1053,6 @@ handle_key_press(XKeyEvent *e)
             case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
             case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
             case FOCUS_MONITOR:      focus_monitor((void *)(long)keys[i].arg.i); break;
-            case SET_SCROLL_VISIBLE: set_scroll_visible((void *)(long)keys[i].arg.i); break;
-            case INCR_SCROLL_VISIBLE: set_scroll_visible((void *)(long)1); break;
-            case DECR_SCROLL_VISIBLE: set_scroll_visible((void *)(long)-1); break;
             }
             break;
         }
@@ -1153,10 +1065,22 @@ handle_button_press(XButtonEvent *e)
     Workspace *ws = curws();
     int i;
 
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].window == e->window) {
-            refocus(ws, &ws->wins[i]);
-            break;
+    /* Super+Shift+Wheel: scroll windows */
+    if (e->state == (Mod4Mask | ShiftMask)) {
+        if (e->button == Button4)
+            move_horizontal(0);
+        else if (e->button == Button5)
+            move_horizontal(1);
+        return;
+    }
+
+    /* click-to-focus (Button1 only) */
+    if (e->button == Button1) {
+        for (i = 0; i < ws->nwin; i++) {
+            if (ws->wins[i].window == e->window) {
+                refocus(ws, &ws->wins[i]);
+                break;
+            }
         }
     }
 }
@@ -1178,7 +1102,6 @@ monitors_init(void)
     mons[0].current_workspace = 0;
     mons[0].master_factor = 0.5f;
     mons[0].horizontal_mode = 1;
-    mons[0].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
 #else
     if (USE_XINERAMA) {
         int nscreens;
@@ -1197,7 +1120,6 @@ monitors_init(void)
                 mons[i].current_workspace = i % NUM_WORKSPACES;
                 mons[i].master_factor = 0.5f;
                 mons[i].horizontal_mode = 1;
-                mons[i].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
             }
             XFree(screens);
             return;
@@ -1214,7 +1136,6 @@ monitors_init(void)
     mons[0].current_workspace = 0;
     mons[0].master_factor = 0.5f;
     mons[0].horizontal_mode = 1;
-    mons[0].scroll_windows_visible = SCROLL_WINDOWS_VISIBLE;
 #endif
 }
 
@@ -1255,7 +1176,6 @@ init(void)
         spaces[i].nwin = 0;
         spaces[i].cap = 0;
         spaces[i].focused = NULL;
-        spaces[i].scroll_offset = 0;
         spaces[i].tiled = NULL;
         spaces[i].ntiled = 0;
         spaces[i].tiled_cap = 0;

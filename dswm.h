@@ -18,7 +18,7 @@
 #define GAP_OUTER          10       /* px gap between windows and screen edges */
 #define GAP_INNER          10       /* px gap between adjacent tiled windows (per side) */
 
-#define SCROLL_WINDOWS_VISIBLE 2
+#define COLUMN_DIVISOR     2        /* windows per viewport in scroll mode */
 #define RESIZE_STEP        60
 
 #define BAR_POSITION       0       /* 0 = top, 1 = bottom */
@@ -28,11 +28,8 @@
 
 #define INITIAL_CAP        16
 #define MIN_WIN_DIM        10
-#define MIN_WIN_W          200
 #define MIN_MASTER_VERT    0.1f
 #define MAX_MASTER_VERT    0.9f
-#define MIN_SCROLL_VIS     1
-#define MAX_SCROLL_VIS     10
 
 /* modifier keys */
 #define MODKEY             Mod4Mask
@@ -61,8 +58,6 @@ enum {
     SCROLL_LEFT, SCROLL_RIGHT,
     TOGGLE_LAYOUT, TOGGLE_FULLSCREEN, TOGGLE_FLOAT,
     FOCUS_MONITOR,
-    SET_SCROLL_VISIBLE,
-    INCR_SCROLL_VISIBLE, DECR_SCROLL_VISIBLE,
     SWITCH_WORKSPACE, MOVE_TO_WORKSPACE,
 };
 
@@ -101,8 +96,8 @@ static Key keys[] __attribute__((unused)) = {
     { MODKEY|SHTKEY,    XK_q,      QUIT,           { 0 } },
 
     /* focus cycling */
-    { MODKEY,           XK_j,      FOCUS_NEXT,     { 0 } },
-    { MODKEY,           XK_k,      FOCUS_PREV,     { 0 } },
+    { MODKEY,           XK_h,      FOCUS_PREV,     { 0 } },
+    { MODKEY,           XK_l,      FOCUS_NEXT,     { 0 } },
 
     /* swap windows */
     { MODKEY|SHTKEY,    XK_h,      SWAP_PREV,      { 0 } },
@@ -125,14 +120,6 @@ static Key keys[] __attribute__((unused)) = {
     { MODKEY,           XK_comma,  FOCUS_MONITOR,  { .i = 0 } },
     { MODKEY,           XK_period, FOCUS_MONITOR,  { .i = 1 } },
     { MODKEY,           XK_slash,  FOCUS_MONITOR,  { .i = 2 } },
-
-    /* scroll visible */
-    { MODKEY|SHTKEY,    XK_comma,  SET_SCROLL_VISIBLE, { .i = 2 } },
-    { MODKEY|SHTKEY,    XK_period, SET_SCROLL_VISIBLE, { .i = 3 } },
-    { MODKEY|SHTKEY,    XK_slash,  SET_SCROLL_VISIBLE, { .i = 4 } },
-
-    { MODKEY,           XK_equal,  INCR_SCROLL_VISIBLE, { 0 } },
-    { MODKEY,           XK_minus,  DECR_SCROLL_VISIBLE, { 0 } },
 
     /* workspaces */
     WS(1), WS(2), WS(3), WS(4), WS(5), WS(6), WS(7), WS(8), WS(9),
