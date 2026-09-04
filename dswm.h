@@ -7,6 +7,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
+#include <X11/XF86keysym.h>
 
 #define NUM_WORKSPACES     9
 
@@ -26,11 +27,8 @@
 #define USE_XINERAMA       1
 
 #define INITIAL_CAP        16
-#define MAX_TILED          256
 #define MIN_WIN_DIM        10
 #define MIN_WIN_W          200
-#define MIN_MASTER_HORIZ   0.3f
-#define MAX_MASTER_HORIZ   3.0f
 #define MIN_MASTER_VERT    0.1f
 #define MAX_MASTER_VERT    0.9f
 #define MIN_SCROLL_VIS     1
@@ -73,8 +71,16 @@ typedef struct { unsigned int mod; KeySym sym; int act; Arg arg; } Key;
 
 /* shell commands */
 static const char *termcmd[] __attribute__((unused))   = { "alacritty",  NULL };
-static const char *menucmd[] __attribute__((unused))   = { "rofi",       NULL };
+static const char *menucmd[] __attribute__((unused))   = { "sh", "-c", "~/.config/rofi/launcher/launcher.sh", NULL };
 static const char *browsercmd[] __attribute__((unused)) = { "firefox",    NULL };
+
+/* xf86 commands */
+static const char *vol_up[]      __attribute__((unused)) = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "2%+",  NULL };
+static const char *vol_down[]    __attribute__((unused)) = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "2%-",  NULL };
+static const char *vol_mute[]    __attribute__((unused)) = { "wpctl", "set-mute",   "@DEFAULT_AUDIO_SINK@", "toggle", NULL };
+static const char *bright_up[]   __attribute__((unused)) = { "brightnessctl", "s", "2%+",  NULL };
+static const char *bright_down[] __attribute__((unused)) = { "brightnessctl", "s", "2%-",  NULL };
+static const char *dim[] __attribute__((unused)) = { "pkill", "-USR1", "redshift",  NULL };
 
 #define WS(n)                                                          \
         { MODKEY,         XK_##n, SWITCH_WORKSPACE,  { .i = n-1 } },   \
@@ -83,8 +89,12 @@ static const char *browsercmd[] __attribute__((unused)) = { "firefox",    NULL }
 static Key keys[] __attribute__((unused)) = {
     /* launch */
     { MODKEY,           XK_Return, SPAWN,          { .v = termcmd  } },
-    { MODKEY,           XK_d,      SPAWN,          { .v = menucmd  } },
+    { MODKEY,           XK_r,      SPAWN,          { .v = menucmd  } },
     { MODKEY,           XK_b,      SPAWN,          { .v = browsercmd } },
+
+    /* fun things */
+    { MODKEY,           XK_i,      SPAWN,          { .v = dim } },
+
 
     /* wm control */
     { MODKEY,           XK_w,      CLOSE,          { 0 } },
@@ -126,6 +136,13 @@ static Key keys[] __attribute__((unused)) = {
 
     /* workspaces */
     WS(1), WS(2), WS(3), WS(4), WS(5), WS(6), WS(7), WS(8), WS(9),
+
+    /* xf86 media keys */
+    { 0, XF86XK_AudioRaiseVolume,  SPAWN, { .v = vol_up      } },
+    { 0, XF86XK_AudioLowerVolume,  SPAWN, { .v = vol_down    } },
+    { 0, XF86XK_AudioMute,         SPAWN, { .v = vol_mute    } },
+    { 0, XF86XK_MonBrightnessUp,   SPAWN, { .v = bright_up   } },
+    { 0, XF86XK_MonBrightnessDown, SPAWN, { .v = bright_down } },
 };
 
 #endif /* DSWM_H */

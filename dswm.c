@@ -2,7 +2,6 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
-#include <X11/cursorfont.h>
 #include <X11/extensions/Xinerama.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +52,10 @@ struct Workspace {
     int cap;
     ManagedWindow *focused;
     int scroll_offset;
+    /* incremental tiled list */
+    ManagedWindow **tiled;
+    int ntiled;
+    int tiled_cap;
 };
 
 /* globals */
@@ -62,10 +65,23 @@ static int screen;
 static int scrw, scrh;
 static int running = 1;
 static int cur_ws;
+static int retile_pending = 0;
 
 static Monitor mons[8];
 static int nmons;
 static Workspace spaces[NUM_WORKSPACES];
+
+/* cached atoms — interned once at startup */
+static Atom atom_wm_delete;
+static Atom atom_wm_protocols;
+static Atom atom_net_wm_strut;
+static Atom atom_net_wm_state;
+static Atom atom_net_wm_state_full;
+static Atom atom_net_current_desktop;
+static Atom atom_net_supported;
+static Atom atom_net_number_of_desktops;
+static Atom atom_net_active_window;
+static Atom atom_net_wm_name;
 
 /* ---- workspace helpers ---- */
 
@@ -85,26 +101,48 @@ curmon(void)
     return &mons[0];
 }
 
-/* ---- tiling: collect tiled windows from current workspace ---- */
+/* ---- tiled list helpers ---- */
 
-int
-collect_tiled(const Workspace *ws, ManagedWindow **out, int maxout, int monid)
+static void
+tiled_ensure_cap(Workspace *ws)
 {
-    int i, n = 0;
-    for (i = 0; i < ws->nwin && n < maxout; i++)
-        if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen
-            && ws->wins[i].monitor == monid)
-            out[n++] = &ws->wins[i];
-    return n;
+    if (ws->ntiled >= ws->tiled_cap) {
+        int newcap = ws->tiled_cap ? ws->tiled_cap * 2 : INITIAL_CAP;
+        ManagedWindow **tmp = realloc(ws->tiled, newcap * sizeof(ManagedWindow *));
+        if (!tmp) return;
+        ws->tiled = tmp;
+        ws->tiled_cap = newcap;
+    }
+}
+
+static void
+tiled_add(Workspace *ws, ManagedWindow *mw)
+{
+    tiled_ensure_cap(ws);
+    ws->tiled[ws->ntiled++] = mw;
+}
+
+static void
+tiled_remove(Workspace *ws, Window w)
+{
+    int i;
+    for (i = 0; i < ws->ntiled; i++) {
+        if (ws->tiled[i]->window == w) {
+            memmove(&ws->tiled[i], &ws->tiled[i + 1],
+                    (ws->ntiled - i - 1) * sizeof(ManagedWindow *));
+            ws->ntiled--;
+            return;
+        }
+    }
 }
 
 /* ---- bar strut support ---- */
 
-void
+static void
 compute_struts(Monitor *mon)
 {
     Workspace *ws = curws();
-    Atom net_wm_strut, actual;
+    Atom actual;
     int format;
     unsigned long nitems, bytes_after;
     unsigned char *data = NULL;
@@ -112,15 +150,13 @@ compute_struts(Monitor *mon)
 
     if (mon->strut_valid) return;
 
-    net_wm_strut = XInternAtom(dpy, "_NET_WM_STRUT", False);
-
     mon->strut_top = 0;
     mon->strut_bottom = 0;
     mon->strut_left = 0;
     mon->strut_right = 0;
 
     for (i = 0; i < ws->nwin; i++) {
-        if (XGetWindowProperty(dpy, ws->wins[i].window, net_wm_strut,
+        if (XGetWindowProperty(dpy, ws->wins[i].window, atom_net_wm_strut,
                                0, 4, False, XA_CARDINAL, &actual, &format,
                                &nitems, &bytes_after, &data) == Success
             && data && nitems >= 4) {
@@ -173,25 +209,23 @@ tile_horizontal(void)
 {
     Workspace *ws = curws();
     Monitor *mon = curmon();
-    ManagedWindow *tiled[MAX_TILED];
-    int ntiled, i;
+    int i;
     int usable_h, usable_w, x_start, y_start;
     int scroll_vis, ww;
     int all_fit;
     int x_pos, y_pos, win_w, win_h;
 
-    ntiled = collect_tiled(ws, tiled, MAX_TILED, mon->id);
-    if (ntiled == 0) return;
+    if (ws->ntiled == 0) return;
 
     compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
     scroll_vis = mon->scroll_windows_visible;
     if (scroll_vis < MIN_SCROLL_VIS) scroll_vis = MIN_SCROLL_VIS;
 
-    all_fit = (ntiled <= scroll_vis);
+    all_fit = (ws->ntiled <= scroll_vis);
 
     if (all_fit) {
-        ww = usable_w / ntiled;
+        ww = usable_w / ws->ntiled;
     } else {
         ww = usable_w / scroll_vis;
     }
@@ -199,7 +233,7 @@ tile_horizontal(void)
     if (ww > usable_w) ww = usable_w;
 
     if (!all_fit) {
-        int max_off = ntiled * ww - usable_w;
+        int max_off = ws->ntiled * ww - usable_w;
         if (max_off < 0) max_off = 0;
         if (ws->scroll_offset < 0) ws->scroll_offset = 0;
         if (ws->scroll_offset > max_off) ws->scroll_offset = max_off;
@@ -207,7 +241,7 @@ tile_horizontal(void)
         ws->scroll_offset = 0;
     }
 
-    for (i = 0; i < ntiled; i++) {
+    for (i = 0; i < ws->ntiled; i++) {
         int scroll_off = all_fit ? 0 : ws->scroll_offset;
         x_pos = x_start + i * ww - scroll_off + GAP_OUTER;
         y_pos = y_start + GAP_OUTER;
@@ -216,14 +250,14 @@ tile_horizontal(void)
         if (win_w < 1) win_w = 1;
         if (win_h < 1) win_h = 1;
 
-        tiled[i]->x = x_pos;
-        tiled[i]->y = y_pos;
-        tiled[i]->width = win_w;
-        tiled[i]->height = win_h;
+        ws->tiled[i]->x = x_pos;
+        ws->tiled[i]->y = y_pos;
+        ws->tiled[i]->width = win_w;
+        ws->tiled[i]->height = win_h;
 
-        XMoveResizeWindow(dpy, tiled[i]->window,
-                          tiled[i]->x, tiled[i]->y,
-                          tiled[i]->width, tiled[i]->height);
+        XMoveResizeWindow(dpy, ws->tiled[i]->window,
+                          ws->tiled[i]->x, ws->tiled[i]->y,
+                          ws->tiled[i]->width, ws->tiled[i]->height);
     }
 
     XFlush(dpy);
@@ -236,27 +270,25 @@ tile_windows(void)
 {
     Workspace *ws = curws();
     Monitor *mon = curmon();
-    ManagedWindow *tiled[MAX_TILED];
-    int ntiled, i;
+    int i;
     int usable_h, usable_w, x_start, y_start;
     int master_w, stack_x, stack_w, stack_h;
 
-    ntiled = collect_tiled(ws, tiled, MAX_TILED, mon->id);
-    if (ntiled == 0) return;
+    if (ws->ntiled == 0) return;
 
     compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
-    if (ntiled == 1) {
-        tiled[0]->x = x_start + GAP_OUTER;
-        tiled[0]->y = y_start + GAP_OUTER;
-        tiled[0]->width = usable_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        if (tiled[0]->width < 1) tiled[0]->width = 1;
-        if (tiled[0]->height < 1) tiled[0]->height = 1;
+    if (ws->ntiled == 1) {
+        ws->tiled[0]->x = x_start + GAP_OUTER;
+        ws->tiled[0]->y = y_start + GAP_OUTER;
+        ws->tiled[0]->width = usable_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        ws->tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (ws->tiled[0]->width < 1) ws->tiled[0]->width = 1;
+        if (ws->tiled[0]->height < 1) ws->tiled[0]->height = 1;
 
-        XMoveResizeWindow(dpy, tiled[0]->window,
-                          tiled[0]->x, tiled[0]->y,
-                          tiled[0]->width, tiled[0]->height);
+        XMoveResizeWindow(dpy, ws->tiled[0]->window,
+                          ws->tiled[0]->x, ws->tiled[0]->y,
+                          ws->tiled[0]->width, ws->tiled[0]->height);
     } else {
         master_w = (int)(usable_w * mon->master_factor)
                    - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
@@ -266,28 +298,28 @@ tile_windows(void)
         if (master_w < 1) master_w = 1;
         if (stack_w < 1) stack_w = 1;
 
-        stack_h = (usable_h - GAP_OUTER * 2 - GAP_INNER * (ntiled - 1)) / (ntiled - 1)
+        stack_h = (usable_h - GAP_OUTER * 2 - GAP_INNER * (ws->ntiled - 1)) / (ws->ntiled - 1)
                   - 2 * BORDER_WIDTH;
         if (stack_h < 1) stack_h = 1;
 
-        tiled[0]->x = x_start + GAP_OUTER;
-        tiled[0]->y = y_start + GAP_OUTER;
-        tiled[0]->width = master_w;
-        tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        if (tiled[0]->height < 1) tiled[0]->height = 1;
+        ws->tiled[0]->x = x_start + GAP_OUTER;
+        ws->tiled[0]->y = y_start + GAP_OUTER;
+        ws->tiled[0]->width = master_w;
+        ws->tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (ws->tiled[0]->height < 1) ws->tiled[0]->height = 1;
 
-        for (i = 1; i < ntiled; i++) {
-            tiled[i]->x = stack_x;
-            tiled[i]->y = y_start + GAP_OUTER
+        for (i = 1; i < ws->ntiled; i++) {
+            ws->tiled[i]->x = stack_x;
+            ws->tiled[i]->y = y_start + GAP_OUTER
                           + (i - 1) * (stack_h + GAP_INNER + 2 * BORDER_WIDTH);
-            tiled[i]->width = stack_w;
-            tiled[i]->height = stack_h;
+            ws->tiled[i]->width = stack_w;
+            ws->tiled[i]->height = stack_h;
         }
 
-        for (i = 0; i < ntiled; i++) {
-            XMoveResizeWindow(dpy, tiled[i]->window,
-                              tiled[i]->x, tiled[i]->y,
-                              tiled[i]->width, tiled[i]->height);
+        for (i = 0; i < ws->ntiled; i++) {
+            XMoveResizeWindow(dpy, ws->tiled[i]->window,
+                              ws->tiled[i]->x, ws->tiled[i]->y,
+                              ws->tiled[i]->width, ws->tiled[i]->height);
         }
     }
 
@@ -326,16 +358,29 @@ retile(void)
         tile_windows();
 }
 
+static void
+retile_deferred(void)
+{
+    retile_pending = 1;
+}
+
+static void
+flush_retile(void)
+{
+    if (retile_pending) {
+        retile_pending = 0;
+        retile();
+    }
+}
+
 /* ---- tiling: monitor focus ---- */
 
 static void show_workspace(int idx, int visible);
 static void update_ewmh_current_desktop(void);
-void compute_struts(Monitor *mon);
 
 static void
 update_border(Window w, int focused)
 {
-    XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
     XSetWindowBorder(dpy, w, focused ? FOCUS_COLOR : BORDER_COLOR);
 }
 
@@ -453,7 +498,7 @@ toggle_layout(void)
 
 /* ---- tiling: swap windows ---- */
 
-void
+static void
 swap_impl(int delta)
 {
     Workspace *ws = curws();
@@ -478,7 +523,7 @@ swap_impl(int delta)
     ws->wins[cur_idx] = ws->wins[swap_idx];
     ws->wins[swap_idx] = tmp;
 
-    retile();
+    retile_deferred();
 
     ws->focused = &ws->wins[swap_idx];
 }
@@ -509,6 +554,7 @@ show_workspace(int idx, int visible)
         else
             XUnmapWindow(dpy, ws->wins[i].window);
     }
+    XFlush(dpy);
 }
 
 static void
@@ -545,6 +591,7 @@ move_to_workspace(void *arg)
     /* remove from current workspace */
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == win.window) {
+            tiled_remove(ws, win.window);
             memmove(&ws->wins[i], &ws->wins[i + 1],
                     (ws->nwin - i - 1) * sizeof(ManagedWindow));
             ws->nwin--;
@@ -566,6 +613,10 @@ move_to_workspace(void *arg)
     win.workspace = idx;
     target->wins[target->nwin++] = win;
     target->focused = &target->wins[target->nwin - 1];
+
+    /* update tiled list for target workspace */
+    if (!win.is_floating && !win.is_fullscreen)
+        tiled_add(target, &target->wins[target->nwin - 1]);
 
     /* hide the moved window (it's on a non-active workspace now) */
     XUnmapWindow(dpy, win.window);
@@ -596,8 +647,6 @@ manage_window(Window w)
     mw.height = wa.height;
     mw.workspace = cur_ws;
     mw.monitor = curmon()->id;
-    mw.is_floating = 0;
-    mw.is_fullscreen = 0;
 
     /* apply window rules */
     if (XGetClassHint(dpy, w, &ch)) {
@@ -620,9 +669,13 @@ manage_window(Window w)
     }
     ws->wins[ws->nwin++] = mw;
 
+    /* update incremental tiled list */
+    if (!mw.is_floating && !mw.is_fullscreen)
+        tiled_add(ws, &ws->wins[ws->nwin - 1]);
+
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask);
+    XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
     refocus(ws, &ws->wins[ws->nwin - 1]);
-    curmon()->strut_valid = 0;
 
     /* only map if on the current workspace */
     if (mw.workspace == cur_ws)
@@ -652,10 +705,10 @@ unmanage_window(Window w)
 
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == w) {
+            tiled_remove(ws, w);
             memmove(&ws->wins[i], &ws->wins[i + 1],
                     (ws->nwin - i - 1) * sizeof(ManagedWindow));
             ws->nwin--;
-            curmon()->strut_valid = 0;
             break;
         }
     }
@@ -664,7 +717,7 @@ unmanage_window(Window w)
     if (ws->focused)
         update_border(ws->focused->window, 1);
 
-    retile();
+    retile_deferred();
 }
 
 /* ---- focus ---- */
@@ -784,11 +837,11 @@ close_window(void)
 
     if (!ws->focused) return;
 
-    wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    wm_delete = atom_wm_delete;
     memset(&ev, 0, sizeof(ev));
     ev.xclient.type = ClientMessage;
     ev.xclient.window = ws->focused->window;
-    ev.xclient.message_type = XInternAtom(dpy, "WM_PROTOCOLS", False);
+    ev.xclient.message_type = atom_wm_protocols;
     ev.xclient.format = 32;
     ev.xclient.data.l[0] = wm_delete;
     XSendEvent(dpy, ws->focused->window, False, NoEventMask, &ev);
@@ -807,14 +860,16 @@ toggle_fullscreen(void)
 {
     Workspace *ws = curws();
     ManagedWindow *w = ws->focused;
-    Atom net_wm_state, net_wm_state_full;
 
     if (!w) return;
 
     w->is_fullscreen = !w->is_fullscreen;
 
-    net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
-    net_wm_state_full = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
+    /* update tiled list */
+    if (w->is_fullscreen)
+        tiled_remove(ws, w->window);
+    else if (!w->is_floating)
+        tiled_add(ws, w);
 
     if (w->is_fullscreen) {
         /* save pre-fullscreen geometry */
@@ -835,8 +890,8 @@ toggle_fullscreen(void)
         XRaiseWindow(dpy, w->window);
 
         /* set EWMH state */
-        XChangeProperty(dpy, w->window, net_wm_state, XA_ATOM, 32,
-                        PropModeReplace, (unsigned char *)&net_wm_state_full, 1);
+        XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
+                        PropModeReplace, (unsigned char *)&atom_net_wm_state_full, 1);
     } else {
         /* restore */
         w->is_floating = w->pre_fs_floating;
@@ -848,10 +903,10 @@ toggle_fullscreen(void)
         XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
 
         /* clear EWMH state */
-        XChangeProperty(dpy, w->window, net_wm_state, XA_ATOM, 32,
+        XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
                         PropModeReplace, (unsigned char *)0, 0);
 
-        retile();
+        retile_deferred();
     }
 
     XFlush(dpy);
@@ -865,6 +920,13 @@ toggle_float(void)
     if (!w) return;
 
     w->is_floating = !w->is_floating;
+
+    /* update tiled list */
+    if (w->is_floating)
+        tiled_remove(ws, w->window);
+    else
+        tiled_add(ws, w);
+
     if (w->is_floating) {
         /* center on screen */
         w->x = scrw / 2 - w->width / 2;
@@ -872,7 +934,7 @@ toggle_float(void)
         XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
         XRaiseWindow(dpy, w->window);
     } else {
-        retile();
+        retile_deferred();
     }
 
     XFlush(dpy);
@@ -895,48 +957,38 @@ spawn(void *arg)
 
 /* ---- EWMH ---- */
 
-void
+static void
 setup_ewmh(void)
 {
-    Atom net_supported, net_number_of_desktops, net_current_desktop,
-         net_active_window, net_wm_name;
-
-    net_supported = XInternAtom(dpy, "_NET_SUPPORTED", False);
-    net_number_of_desktops = XInternAtom(dpy, "_NET_NUMBER_OF_DESKTOPS", False);
-    net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
-    net_active_window = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
-    net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
-
-    XChangeProperty(dpy, root, net_supported, XA_ATOM, 32,
+    XChangeProperty(dpy, root, atom_net_supported, XA_ATOM, 32,
                     PropModeReplace, (unsigned char[]){
-                        net_number_of_desktops,
-                        net_current_desktop,
-                        net_active_window,
-                        net_wm_name,
+                        atom_net_number_of_desktops,
+                        atom_net_current_desktop,
+                        atom_net_active_window,
+                        atom_net_wm_name,
                     }, 4);
 
     long ndesk = NUM_WORKSPACES;
-    XChangeProperty(dpy, root, net_number_of_desktops, XA_CARDINAL, 32,
+    XChangeProperty(dpy, root, atom_net_number_of_desktops, XA_CARDINAL, 32,
                     PropModeReplace, (unsigned char *)&ndesk, 1);
 
     long cdesk = cur_ws;
-    XChangeProperty(dpy, root, net_current_desktop, XA_CARDINAL, 32,
+    XChangeProperty(dpy, root, atom_net_current_desktop, XA_CARDINAL, 32,
                     PropModeReplace, (unsigned char *)&cdesk, 1);
 }
 
 static void
 update_ewmh_current_desktop(void)
 {
-    Atom net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
     long cdesk = cur_ws;
-    XChangeProperty(dpy, root, net_current_desktop, XA_CARDINAL, 32,
+    XChangeProperty(dpy, root, atom_net_current_desktop, XA_CARDINAL, 32,
                     PropModeReplace, (unsigned char *)&cdesk, 1);
     XFlush(dpy);
 }
 
 /* ---- key grabbing ---- */
 
-void
+static void
 grab_keys(void)
 {
     unsigned int i, j;
@@ -956,7 +1008,7 @@ grab_keys(void)
 
 /* ---- error handler (ignore X errors) ---- */
 
-int
+static int
 xerror(Display *d, XErrorEvent *ee)
 {
     (void)d;
@@ -966,27 +1018,48 @@ xerror(Display *d, XErrorEvent *ee)
 
 /* ---- event handlers ---- */
 
-void
+static void
 handle_map_request(XMapRequestEvent *e)
 {
     manage_window(e->window);
 }
 
-void
+static void
 handle_destroy_notify(XDestroyWindowEvent *e)
 {
     unmanage_window(e->window);
 }
 
-void
+static void
 handle_unmap_notify(XUnmapEvent *e)
 {
     unmanage_window(e->window);
 }
 
-void
+static void
 handle_configure_request(XConfigureRequestEvent *e)
 {
+    Workspace *ws = curws();
+    ManagedWindow *mw = NULL;
+    int i;
+
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].window == e->window) {
+            mw = &ws->wins[i];
+            break;
+        }
+    }
+
+    /* tiled windows: WM controls geometry, only honor stacking */
+    if (mw && !mw->is_floating && !mw->is_fullscreen) {
+        XWindowChanges wc;
+        wc.sibling = e->above;
+        wc.stack_mode = e->detail;
+        XConfigureWindow(dpy, e->window, CWSibling | CWStackMode, &wc);
+        return;
+    }
+
+    /* floating/unknown: honor everything */
     XWindowChanges wc;
     wc.x = e->x;
     wc.y = e->y;
@@ -998,7 +1071,7 @@ handle_configure_request(XConfigureRequestEvent *e)
     XConfigureWindow(dpy, e->window, e->value_mask, &wc);
 }
 
-void
+static void
 handle_enter_notify(XCrossingEvent *e)
 {
     Workspace *ws = curws();
@@ -1014,7 +1087,7 @@ handle_enter_notify(XCrossingEvent *e)
     }
 }
 
-void
+static void
 handle_key_press(XKeyEvent *e)
 {
     KeySym keysym = XLookupKeysym(e, 0);
@@ -1049,7 +1122,7 @@ handle_key_press(XKeyEvent *e)
     }
 }
 
-void
+static void
 handle_button_press(XButtonEvent *e)
 {
     Workspace *ws = curws();
@@ -1065,7 +1138,7 @@ handle_button_press(XButtonEvent *e)
 
 /* ---- monitor init ---- */
 
-void
+static void
 monitors_init(void)
 {
     /* try Xinerama first */
@@ -1122,7 +1195,22 @@ monitors_init(void)
 
 /* ---- init / run / cleanup ---- */
 
-void
+static void
+cache_atoms(void)
+{
+    atom_wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    atom_wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
+    atom_net_wm_strut = XInternAtom(dpy, "_NET_WM_STRUT", False);
+    atom_net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
+    atom_net_wm_state_full = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
+    atom_net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
+    atom_net_supported = XInternAtom(dpy, "_NET_SUPPORTED", False);
+    atom_net_number_of_desktops = XInternAtom(dpy, "_NET_NUMBER_OF_DESKTOPS", False);
+    atom_net_active_window = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+    atom_net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
+}
+
+static void
 init(void)
 {
     XSetErrorHandler(xerror);
@@ -1134,6 +1222,8 @@ init(void)
     scrw = DisplayWidth(dpy, screen);
     scrh = DisplayHeight(dpy, screen) - BAR_HEIGHT;
 
+    cache_atoms();
+
     /* init workspaces */
     for (int i = 0; i < NUM_WORKSPACES; i++) {
         spaces[i].wins = NULL;
@@ -1141,6 +1231,9 @@ init(void)
         spaces[i].cap = 0;
         spaces[i].focused = NULL;
         spaces[i].scroll_offset = 0;
+        spaces[i].tiled = NULL;
+        spaces[i].ntiled = 0;
+        spaces[i].tiled_cap = 0;
     }
 
     monitors_init();
@@ -1153,7 +1246,7 @@ init(void)
     signal(SIGCHLD, SIG_IGN);
 }
 
-void
+static void
 run(void)
 {
     XEvent ev;
@@ -1169,15 +1262,18 @@ run(void)
         case ButtonPress:      handle_button_press(&ev.xbutton); break;
         default: break;
         }
+        flush_retile();
     }
 }
 
-void
+static void
 cleanup(void)
 {
     int i;
-    for (i = 0; i < NUM_WORKSPACES; i++)
+    for (i = 0; i < NUM_WORKSPACES; i++) {
         free(spaces[i].wins);
+        free(spaces[i].tiled);
+    }
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
     XCloseDisplay(dpy);
 }

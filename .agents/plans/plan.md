@@ -265,4 +265,114 @@
 - **2026-09-01 07:40 UTC:** File split + workspace fix completed (Phases 13-15). Split dswm.c (1082 LOC) into 6 focused files: dswm.c (173, main/init/run/cleanup), layout.c (377, tiling), workspace.c (354, window mgmt + visibility), events.c (106, event handlers), ewmh.c (42, EWMH), util.c (45, grab/spawn/error). Fixed workspace visibility: added show_workspace() with XUnmapWindow/XMapWindow, switch_workspace() now hides old WS and shows new WS, manage_window() only maps if on active WS, move_to_workspace() unmaps moved window. Total 1367 LOC across 8 files. Build: 0 warnings, 0 errors. Binary: 36K dswm, 17K dswm-session.
 - **2026-09-01 08:10 UTC:** Reverted file split back to single dswm.c. Workspace fix was broken in split version (show_workspace checked idx==cur_ws, making it a no-op). Reverted to commit 025565e single-file 1082 LOC dswm.c. Reimplemented workspace visibility correctly: added show_workspace(int idx, int visible) with explicit map/unmap param, switch_workspace() unmaps old WS then maps new WS, focus_monitor() unmaps old then maps new, manage_window() only maps if on current workspace, move_to_workspace() unmaps moved window, added update_ewmh_current_desktop(). 1132 LOC, 0 warnings, 0 errors. Binary: 39K dswm.
 - **2026-09-02 20:25 UTC:** Feature updates. Changed default layout to scrolling mode (horizontal_mode=1). Fixed gap inconsistency — tile_windows() now uses GAP_INNER for inner gaps instead of GAP_OUTER/2. Added center_focused flag to Monitor struct (default 1). Added toggle_center_focused() with Super+c keybind. tile_horizontal() now centers focused window on screen when center_focused=1, otherwise scrolls to show all. 1201 LOC, 0 warnings, 0 errors. Binary: 40K dswm.
+- **2026-09-04 07:22 UTC:** Phase 1 (Code Quality) + Phase 2 (EWMH) completed from prompt.md.
+  - **Phase 1 changes:**
+    - Added `should_float()` heuristic (dswm.c:597-637): checks `_NET_WM_WINDOW_TYPE` (dialog, splash, util, toolbar), transient-for hints, fixed-size windows (min==max size hints). Called in `manage_window()` as fallback after rules[] matching.
+    - Rewrote `handle_configure_request()` (dswm.c:1100-1136): filters by window type — denies configure requests for tiled windows (sends back current geometry), honors for floating/unmanaged windows.
+  - **Phase 2 changes:**
+    - `setup_ewmh()` (dswm.c:980-1028): added `_NET_SUPPORTING_WM_CHECK` (creates WM check window, sets on both), `_NET_WM_NAME` = "dswm" (UTF8), `_NET_CLIENT_LIST`, `_NET_CLOSE_WINDOW` to supported atoms (7 total).
+    - Added `update_ewmh_client_list()` helper (dswm.c:1030-1046): builds Window list from current workspace, sets `_NET_CLIENT_LIST` property. Called from `manage_window()` and `unmanage_window()`.
+    - Added `handle_client_message()` (dswm.c:1173-1220): handles `_NET_ACTIVE_WINDOW` (focus request) and `_NET_CLOSE_WINDOW` (polite close via WM_DELETE_WINDOW).
+    - Added `ClientMessage` case to event loop (dswm.c:1288).
+  - Added `wmcheck` global (Window) for WM check window.
+  - Fixed: removed unused `i` variable in `should_float`, replaced `XA_UTF8STRING` with `XInternAtom("UTF8_STRING")` (not in standard Xlib headers).
+  - **Verification:** `make clean && make` → **0 warnings, 0 errors**. Binary: 40K dswm. 1341 LOC (+157 from 1184).
+  - **Next:** Phase 3 (structural improvements) — centralized state struct, function pointer dispatch, fixtree().
+
+### Phase 3 — Full niri-feature refactor for X11/C
+- **Date:** 2026-09-04 (completed, revised)
+- **Scope:** Focus/swap/input refactor based on niri + nwm references
+- **Changes Made:**
+  - **3a: Core focus refactor:**
+    - `refocus()` rewritten: unfocuses all windows first (reset borders), reverts to root if no window, calls `mru_update()`
+    - `focus_next/prev()` rewritten: cycles all windows (float+tiled), stops at edges (no wrap), scroll-adjusts only for tiled windows
+    - `focus_monitor()`: added `XWarpPointer` to center of target monitor
+    - `unmanage_window()`: refocuses to window at `closed_idx - 1` instead of always last, calls `mru_remove()`
+  - **3b: Input handling:**
+    - `handle_button_press()`: click-to-focus on Button1 without modifiers
+    - Focus-follows-mouse removed (keyboard-only, matches original design)
+  - **3c: _NET_ACTIVE_WINDOW:** searches all workspaces, switches workspace if needed
+  - **3d: MRU/Alt-Tab:**
+    - `MRUList` struct (Window array + count), `mru_update()` on focus, `mru_remove()` on unmanage
+    - `mru_cycle_start()`: `XGrabKeyboard` + nested event loop, Tab cycles, Escape cancels, Super-release confirms
+    - Super+Tab detected in `handle_key_press()`
+    - Added `KeyReleaseMask` to `XSelectInput`
+  - **3e: Animations removed** (user request — instant movement, simpler code)
+- **Verification:** `make clean && make` → **0 warnings, 0 errors**. Binary: 45K dswm. 1556 LOC.
+- **Next:** Phase 4 — centralized state struct, function pointer dispatch, fixtree()
+
+### Post-Phase 3 Fixes & Additions
+- **Date:** 2026-09-04
+- **Window insertion:** `manage_window()` now inserts new window after focused window (not at end). Uses `memmove` to shift elements right, inserts at `focused_idx + 1`. Scroll offset adjusts to keep newly inserted window visible.
+- **Focus on close:** `unmanage_window()` focuses left neighbor (`closed_idx - 1`). Added early return guard for double-event (DestroyNotify + UnmapNotify) to prevent focus reset to index 0.
+- **Window resize (scrolling):** Added `RESIZE_WINDOW` action.
+  - `ManagedWindow.width_factor` (float, default 1.0) — persists across retiles
+  - `resize_window()` modifies `width_factor` by ±0.05, clamped 0.2..3.0
+  - `tile_horizontal()` uses proportional widths: `width = (factor / total_factors) * usable_w`
+  - Keybinds: `Super+Ctrl+H` (shrink), `Super+Ctrl+L` (grow)
+- **2-window scroll view:** `tile_horizontal()` rewritten.
+  - Hardcoded `scroll_vis = 2` — always exactly 2 windows visible
+  - Each window width = `(width_factor / total_factor) * usable_w` for visible pair only
+  - `scroll_offset` snaps to page increments (`page_w = usable_w`)
+  - Off-screen windows moved off-screen via `XMoveResizeWindow`
+  - `manage_window()` auto-scrolls to `(insert_idx / 2) * usable_w`
+  - `resize_window()` scrolls to `(focused_idx / 2) * usable_w` after resize
+- **Verification:** `make clean && make` → **0 warnings, 0 errors**. ~1619 LOC.
+
+### Niri-style Scrolling Layout (Full Model)
+- **Date:** 2026-09-04
+- **Scope:** Replace fixed 2-window scroll with Niri-like continuous viewport scrolling
+- **Core concept:** Each window is a "column" with absolute width (`width_factor * usable_w`). Viewport scrolls continuously to keep focused column visible. As many columns fit as the viewport allows.
+- **New helpers:**
+  - `compute_column_x()` — pixel x-position of column at idx (sums widths left-to-right)
+  - `column_width()` — pixel width of a column (`width_factor * usable_w`)
+  - `scroll_to_column()` — scrolls viewport to keep column visible (fit-to-edge)
+  - `total_columns_width()` — sum of all column widths
+- **Rewritten functions:**
+  - `tile_horizontal()` — all columns laid out at real x-positions, viewport clips to `[scroll_offset, scroll_offset+usable_w]`
+  - `resize_window()` — uses `scroll_to_column()` after width_factor change
+  - `manage_window()` — uses `scroll_to_column()` to show newly inserted column
+  - `focus_next()`/`focus_prev()` — uses `scroll_to_column()` for auto-scroll
+  - `move_horizontal()` — scrolls by `SCROLL_STEP` pixels, clamps to total width
+  - `swap_impl()` — uses `scroll_to_column()` after swap
+- **Removed:**
+  - `scroll_windows_visible` from Monitor struct
+  - `SET_SCROLL_VISIBLE`, `INCR_SCROLL_VISIBLE`, `DECR_SCROLL_VISIBLE` actions + keybinds
+  - `set_scroll_visible()` function
+  - `SCROLL_WINDOWS_VISIBLE`, `MIN_SCROLL_VIS`, `MAX_SCROLL_VIS` constants
+- **Verification:** `make clean && make` → **0 warnings, 0 errors**. ~1600 LOC.
+
+### Performance Optimizations (Emergency Fix)
+- **Date:** 2026-09-04
+- **Scope:** Address performance constraints after bloat from Niri model attempt
+- **Phase 1 — X11 Round-trip Elimination:**
+  - Cached all `XInternAtom` results at startup in static globals (`atom_wm_delete`, `atom_wm_protocols`, `atom_net_wm_strut`, etc.)
+  - Eliminated ~11 X server round-trips scattered throughout hot paths
+  - Fixed `compute_struts()` to use cached `atom_net_wm_strut`
+  - Fixed `close_window()` to use cached `atom_wm_delete` and `atom_wm_protocols`
+  - Fixed `toggle_fullscreen()` to use cached `atom_net_wm_state` and `atom_net_wm_state_full`
+  - Fixed `setup_ewmh()` and `update_ewmh_current_desktop()` to use cached atoms
+- **Phase 1 — Strut Caching Fix:**
+  - Removed `strut_valid = 0` from `manage_window()` and `unmanage_window()`
+  - Strut cache now persists across window add/remove events
+  - Only invalidated on workspace switch or explicit property changes
+- **Phase 1 — Border Optimization:**
+  - Removed redundant `XSetWindowBorderWidth` from `update_border()` (was called on every focus change)
+  - Border width now set once in `manage_window()` via `XSetWindowBorderWidth()`
+  - `update_border()` now only calls `XSetWindowBorder()` for color change (1 X call instead of 2)
+- **Phase 2 — Deferred Retile:**
+  - Added `retile_deferred()` and `flush_retile()` mechanism
+  - `retile_pending` flag batches multiple retile requests
+  - `flush_retile()` called at end of each event loop iteration
+  - Changed `swap_impl()`, `unmanage_window()`, `toggle_fullscreen()`, `toggle_float()` to use `retile_deferred()`
+- **Phase 2 — Workspace Map/Unmap Optimization:**
+  - Added `XFlush(dpy)` after `show_workspace()` map/unmap loops
+  - Prevents event echo flood on workspace switch
+- **Phase 3 — Incremental Tiled List:**
+  - Added `tiled`, `ntiled`, `tiled_cap` fields to `Workspace` struct
+  - Added `tiled_ensure_cap()`, `tiled_add()`, `tiled_remove()` helper functions
+  - Updated `manage_window()`, `unmanage_window()`, `toggle_float()`, `toggle_fullscreen()`, `move_to_workspace()` to maintain tiled list incrementally
+  - `tile_horizontal()` and `tile_windows()` now use `ws->tiled` directly instead of calling `collect_tiled()`
+  - Eliminated O(n) scan on every tiling pass
+- **Verification:** `make clean && make` → **0 warnings, 0 errors**. ~1284 LOC (down from ~1600).
 
