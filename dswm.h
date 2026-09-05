@@ -65,6 +65,15 @@ struct ManagedWindow {
     int pre_fs_width, pre_fs_height;
 };
 
+/* ---- mouse drag state ---- */
+
+typedef struct {
+    int active;           /* 0=idle, 1=dragging */
+    ManagedWindow *win;   /* window being dragged */
+    int start_x, start_y; /* cursor position at grab */
+    int orig_x, orig_y;   /* original window position */
+} MouseState;
+
 typedef struct Monitor Monitor;
 struct Monitor {
     int id;
@@ -152,6 +161,7 @@ extern int cur_ws;
 extern Monitor mons[8];
 extern int nmons;
 extern Workspace spaces[NUM_WORKSPACES];
+extern MouseState mouse;
 
 /* cached atoms (owned by main.c) */
 extern Atom atom_wm_delete;
@@ -227,6 +237,8 @@ void handle_configure_request(XConfigureRequestEvent *e);
 void handle_enter_notify(XCrossingEvent *e);
 void handle_key_press(XKeyEvent *e);
 void handle_button_press(XButtonEvent *e);
+void handle_button_release(XButtonEvent *e);
+void handle_motion_notify(XMotionEvent *e);
 
 /* ---- main.c prototypes ---- */
 

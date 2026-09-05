@@ -23,6 +23,7 @@ int cur_ws;
 Monitor mons[8];
 int nmons;
 Workspace spaces[NUM_WORKSPACES];
+MouseState mouse;
 
 /* cached atoms */
 Atom atom_wm_delete;
@@ -208,7 +209,7 @@ grab_keys(void)
         }
     }
 
-    XGrabButton(dpy, AnyButton, MODKEY | SHTKEY, root, True,
+    XGrabButton(dpy, Button1, MODKEY, root, True,
                 ButtonPressMask, GrabModeAsync, GrabModeAsync, None, None);
 }
 
@@ -294,7 +295,8 @@ init(void)
 
     grab_keys();
     XSelectInput(dpy, root, SubstructureRedirectMask | SubstructureNotifyMask
-                           | KeyPressMask | ButtonPressMask | PropertyChangeMask);
+                           | KeyPressMask | ButtonPressMask | ButtonReleaseMask
+                           | PointerMotionMask | PropertyChangeMask);
 
     signal(SIGCHLD, SIG_IGN);
 
@@ -342,6 +344,8 @@ run(void)
         switch (ev.type) {
         case KeyPress:         handle_key_press(&ev.xkey); break;
         case ButtonPress:      handle_button_press(&ev.xbutton); break;
+        case ButtonRelease:    handle_button_release(&ev.xbutton); break;
+        case MotionNotify:     handle_motion_notify(&ev.xmotion); break;
         case MapRequest:       handle_map_request(&ev.xmaprequest); break;
         case DestroyNotify:    handle_destroy_notify(&ev.xdestroywindow); break;
         case UnmapNotify:      handle_unmap_notify(&ev.xunmap); break;

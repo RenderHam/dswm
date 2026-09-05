@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <err.h>
+#include <limits.h>
 
 #define NELEM(x)  (sizeof(x) / sizeof(x[0]))
 
@@ -671,14 +672,108 @@ handle_key_press(XKeyEvent *e)
     }
 }
 
-/* ButtonPress: Mod4+Shift + scroll wheel scrolls the horizontal layout. */
+/* ButtonPress: Super+Button1 starts a window drag for swapping. */
 void
 handle_button_press(XButtonEvent *e)
 {
-    if ((e->state & (Mod4Mask | ShiftMask)) == (Mod4Mask | ShiftMask)) {
-        if (e->button == Button4)
-            move_horizontal(0);
-        else if (e->button == Button5)
-            move_horizontal(1);
+    Workspace *ws = curws();
+    Monitor *mon = curmon();
+    int i;
+
+    if (!mon->horizontal_mode) return;
+    if (!(e->state & Mod4Mask)) return;
+    if (e->button != Button1) return;
+
+    /* Find the tiled window under the cursor */
+    for (i = 0; i < ws->ntiled; i++) {
+        ManagedWindow *mw = ws->tiled[i];
+        int screen_x = mw->x - ws->cam_x;
+        if (e->x_root >= screen_x && e->x_root < screen_x + mw->width
+            && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
+            mouse.active = 1;
+            mouse.win = mw;
+            mouse.start_x = e->x_root;
+            mouse.start_y = e->y_root;
+            mouse.orig_x = mw->x;
+            mouse.orig_y = mw->y;
+            XGrabPointer(dpy, root, True,
+                         ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                         GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+            break;
+        }
     }
+}
+
+/* ButtonRelease: finalize drag — swap the dragged window with the closest
+   tiled window under the cursor, then retile.  We use center-distance
+   instead of exact bounds because the cursor often overshoots the target
+   when dragging left-to-right. */
+void
+handle_button_release(XButtonEvent *e)
+{
+    Workspace *ws = curws();
+    int i;
+    int best_idx = -1;
+    int best_dist = INT_MAX;
+
+    (void)e;
+
+    if (!mouse.active || !mouse.win) goto done;
+
+    /* Find the closest non-dragged tiled window to the cursor */
+    for (i = 0; i < ws->ntiled; i++) {
+        ManagedWindow *mw = ws->tiled[i];
+        if (mw == mouse.win) continue;
+        int screen_x = mw->x - ws->cam_x;
+        int cx = screen_x + mw->width / 2;
+        int cy = mw->y + mw->height / 2;
+        int dx = e->x_root - cx;
+        int dy = e->y_root - cy;
+        int dist = dx * dx + dy * dy;
+        if (dist < best_dist) {
+            best_dist = dist;
+            best_idx = i;
+        }
+    }
+
+    if (best_idx >= 0) {
+        /* Swap the dragged window with the closest window in tiled[] */
+        ManagedWindow *a = mouse.win;
+        ManagedWindow *b = ws->tiled[best_idx];
+        int idx_a = -1, j;
+        for (j = 0; j < ws->ntiled; j++) {
+            if (ws->tiled[j] == a) { idx_a = j; break; }
+        }
+        if (idx_a != -1) {
+            ws->tiled[idx_a] = b;
+            ws->tiled[best_idx] = a;
+        }
+    }
+
+done:
+    mouse.active = 0;
+    mouse.win = NULL;
+    XUngrabPointer(dpy, CurrentTime);
+    retile_deferred();
+}
+
+/* MotionNotify: during drag, move the dragged window with the cursor. */
+void
+handle_motion_notify(XMotionEvent *e)
+{
+    Workspace *ws = curws();
+    int dx, dy, screen_x;
+
+    if (!mouse.active || !mouse.win) return;
+
+    dx = e->x_root - mouse.start_x;
+    dy = e->y_root - mouse.start_y;
+
+    mouse.win->x = mouse.orig_x + dx;
+    mouse.win->y = mouse.orig_y + dy;
+
+    screen_x = mouse.win->x - ws->cam_x;
+    XMoveResizeWindow(dpy, mouse.win->window,
+                      screen_x, mouse.win->y,
+                      mouse.win->width, mouse.win->height);
 }
