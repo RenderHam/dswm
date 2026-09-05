@@ -1,3 +1,6 @@
+/* main.c — Entry point, X11 init, EWMH setup, atom caching, key grabbing,
+   and the main event loop. Globals and command tables live here. */
+
 #include "dswm.h"
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
@@ -38,7 +41,68 @@ Atom atom_net_wm_type_dock;
 Atom atom_net_wm_type_splash;
 Atom atom_motif_wm_hints;
 
-/* ---- X error handler ---- */
+/* ---- shell commands ---- */
+
+const char *termcmd[]   = { "alacritty",  NULL };
+const char *menucmd[]   = { "sh", "-c", "~/.config/rofi/launcher/launcher.sh", NULL };
+const char *browsercmd[] = { "firefox",    NULL };
+
+/* ---- xf86 commands ---- */
+
+const char *vol_up[]      = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "2%+",  NULL };
+const char *vol_down[]    = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "2%-",  NULL };
+const char *vol_mute[]    = { "wpctl", "set-mute",   "@DEFAULT_AUDIO_SINK@", "toggle", NULL };
+const char *bright_up[]   = { "brightnessctl", "s", "2%+",  NULL };
+const char *bright_down[] = { "brightnessctl", "s", "2%-",  NULL };
+const char *dim[]         = { "pkill", "-USR1", "redshift",  NULL };
+
+/* ---- window rules ---- */
+
+Rule rules[] = {
+    { "pavucontrol",        1 },
+    { "rofi",               1 },
+    { "steam",              1 },
+    { "steamwebhelper",     1 },
+};
+
+const size_t num_rules = sizeof(rules) / sizeof(rules[0]);
+
+/* ---- keybindings ---- */
+
+Key keys[] = {
+    { MODKEY,           XK_Return, SPAWN,          { .v = termcmd  } },
+    { MODKEY,           XK_r,      SPAWN,          { .v = menucmd  } },
+    { MODKEY,           XK_b,      SPAWN,          { .v = browsercmd } },
+    { MODKEY,           XK_i,      SPAWN,          { .v = dim } },
+    { MODKEY,           XK_w,      CLOSE,          { 0 } },
+    { MODKEY|SHTKEY,    XK_q,      QUIT,           { 0 } },
+    { MODKEY,           XK_h,      FOCUS_PREV,     { 0 } },
+    { MODKEY,           XK_l,      FOCUS_NEXT,     { 0 } },
+    { MODKEY|SHTKEY,    XK_h,      SWAP_PREV,      { 0 } },
+    { MODKEY|SHTKEY,    XK_l,      SWAP_NEXT,      { 0 } },
+    { MODKEY|ControlMask, XK_h,    RESIZE_MASTER,  { .i = -RESIZE_STEP } },
+    { MODKEY|ControlMask, XK_l,    RESIZE_MASTER,  { .i = +RESIZE_STEP } },
+    { MODKEY|Mod1Mask,  XK_h,      RESIZE_WINDOW,  { .i = -1 } },
+    { MODKEY|Mod1Mask,  XK_l,      RESIZE_WINDOW,  { .i = +1 } },
+    { MODKEY,           XK_Left,   SCROLL_LEFT,    { 0 } },
+    { MODKEY,           XK_Right,  SCROLL_RIGHT,   { 0 } },
+    { MODKEY,           XK_t,      TOGGLE_LAYOUT,  { 0 } },
+    { MODKEY,           XK_f,      TOGGLE_FULLSCREEN, { 0 } },
+    { MODKEY,           XK_m,      FIT_WINDOW,     { 0 } },
+    { MODKEY,           XK_c,      TOGGLE_CENTER_FOCUS, { 0 } },
+    { MODKEY|SHTKEY,    XK_space,  TOGGLE_FLOAT,   { 0 } },
+    { MODKEY,           XK_comma,  FOCUS_MONITOR,  { .i = 0 } },
+    { MODKEY,           XK_period, FOCUS_MONITOR,  { .i = 1 } },
+    { MODKEY,           XK_slash,  FOCUS_MONITOR,  { .i = 2 } },
+    WS(1), WS(2), WS(3), WS(4), WS(5), WS(6), WS(7), WS(8), WS(9),
+    { 0, XF86XK_AudioRaiseVolume,  SPAWN, { .v = vol_up      } },
+    { 0, XF86XK_AudioLowerVolume,  SPAWN, { .v = vol_down    } },
+    { 0, XF86XK_AudioMute,         SPAWN, { .v = vol_mute    } },
+    { 0, XF86XK_MonBrightnessUp,   SPAWN, { .v = bright_up   } },
+    { 0, XF86XK_MonBrightnessDown, SPAWN, { .v = bright_down } },
+};
+
+const size_t num_keys = sizeof(keys) / sizeof(keys[0]);
 
 static int
 xerror(Display *d, XErrorEvent *ee)
@@ -48,6 +112,7 @@ xerror(Display *d, XErrorEvent *ee)
 }
 
 /* ---- EWMH support ---- */
+/* Advertise supported _NET_WM hints to pagers/taskbars. */
 
 void
 update_ewmh_current_desktop(void)
@@ -58,6 +123,7 @@ update_ewmh_current_desktop(void)
     XFlush(dpy);
 }
 
+/* Write all supported EWMH atoms and initial desktop count at startup. */
 void
 setup_ewmh(void)
 {
@@ -85,6 +151,7 @@ setup_ewmh(void)
 }
 
 /* ---- atom caching ---- */
+/* Intern frequently-used X atoms once at startup to avoid repeated round-trips. */
 
 void
 cache_atoms(void)
@@ -107,6 +174,8 @@ cache_atoms(void)
 }
 
 /* ---- key grabbing ---- */
+/* Grab all key bindings on the root window.  We iterate modifier variants
+   so that CapsLock/NumLock (LockMask, Mod2Mask) don't break bindings. */
 
 void
 grab_keys(void)
@@ -120,7 +189,7 @@ grab_keys(void)
 
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
 
-    for (i = 0; i < NELEM(keys); i++) {
+    for (i = 0; i < num_keys; i++) {
         KeyCode code = XKeysymToKeycode(dpy, keys[i].sym);
         if (!code) continue;
 
@@ -188,6 +257,8 @@ monitors_init(void)
 
 /* ---- init / cleanup / run ---- */
 
+/* Initialise the display, root window, atoms, monitors, workspaces,
+   key grabs, and manage any pre-existing windows. */
 static void
 init(void)
 {
@@ -276,6 +347,7 @@ run(void)
         case UnmapNotify:      handle_unmap_notify(&ev.xunmap); break;
         case ConfigureRequest: handle_configure_request(&ev.xconfigurerequest); break;
         case EnterNotify:      handle_enter_notify(&ev.xcrossing); break;
+        default: continue;
         }
         flush_retile();
     }

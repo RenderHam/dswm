@@ -1,3 +1,8 @@
+/* layout.c — Tiling layout engine.
+   Computes usable geometry (accounting for bars/struts), arranges tiled
+   windows in horizontal-scroll or master-stack mode, and manages the
+   camera (scroll offset) for the infinite-canvas horizontal layout. */
+
 #include "dswm.h"
 #include <X11/Xatom.h>
 #include <stdlib.h>
@@ -79,6 +84,10 @@ rebuild_tiled(Workspace *ws)
 
 /* ---- bar strut support ---- */
 
+/* Read _NET_WM_STRUT from every window on the current workspace.
+   Struts are reserved screen edges (e.g. panel bars) that tiled windows
+   must avoid.  Results are cached in mon->strut_* and invalidated on
+   window add/remove via strut_valid. */
 static void
 compute_struts(Monitor *mon)
 {
@@ -118,6 +127,8 @@ compute_struts(Monitor *mon)
     mon->strut_valid = 1;
 }
 
+/* Compute the rectangular region of the monitor that is usable for tiling,
+   after subtracting the built-in bar height and external struts. */
 static void
 compute_usable_area(Monitor *mon, int *usable_w, int *usable_h,
                     int *x_start, int *y_start)
@@ -142,46 +153,35 @@ compute_usable_area(Monitor *mon, int *usable_w, int *usable_h,
 }
 
 /* ---- tiling: horizontal scroll layout (infinite canvas) ---- */
+/* Each tiled window is a column whose width is scaled by width_factor.
+   A virtual camera (cam_x) scrolls the strip left/right so that the
+   focused column is visible — either centered or edge-snapped. */
+
+static int
+compute_usable_w(Monitor *mon)
+{
+    int usable_w = mon->width - mon->strut_left - mon->strut_right;
+    if (usable_w < MIN_WIN_DIM) usable_w = mon->width;
+    return usable_w;
+}
 
 void
-tile_horizontal(void)
+update_camera(void)
 {
     Workspace *ws = curws();
     Monitor *mon = curmon();
     int i;
-    int usable_h, usable_w, x_start, y_start;
-    int win_h, col_w, win_w;
-    int cam_x = 0;
-    int cur_x;
+    int usable_w, cam_x = 0, centered = 0;
 
     if (ws->ntiled == 0) return;
 
-    compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
+    usable_w = compute_usable_w(mon);
 
-    win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-    if (win_h < 1) win_h = 1;
+    int x_start = ws->tiled[0]->x - GAP_OUTER;
+    int last = ws->ntiled - 1;
+    int total_w = ws->tiled[last]->x + ws->tiled[last]->width
+                + GAP_OUTER + 2 * BORDER_WIDTH - x_start;
 
-    cur_x = x_start;
-    for (i = 0; i < ws->ntiled; i++) {
-        float f = ws->tiled[i]->width_factor;
-        if (f < MIN_WIDTH_FACTOR) f = MIN_WIDTH_FACTOR;
-        if (f > MAX_WIDTH_FACTOR) f = MAX_WIDTH_FACTOR;
-        col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
-        if (col_w < MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH)
-            col_w = MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
-        if (col_w > usable_w) col_w = usable_w;
-        win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        if (win_w < 1) win_w = 1;
-
-        ws->tiled[i]->x = cur_x + GAP_OUTER;
-        ws->tiled[i]->y = y_start + GAP_OUTER;
-        ws->tiled[i]->width = win_w;
-        ws->tiled[i]->height = win_h;
-        cur_x += col_w;
-    }
-
-    int total_w = cur_x - x_start;
-    int centered = 0;
     if (center_focused && ws->focused) {
         for (i = 0; i < ws->ntiled; i++) {
             if (ws->tiled[i] == ws->focused) {
@@ -229,7 +229,89 @@ tile_horizontal(void)
     XFlush(dpy);
 }
 
+void
+tile_horizontal(void)
+{
+    Workspace *ws = curws();
+    Monitor *mon = curmon();
+    int i;
+    int usable_h, usable_w, x_start, y_start;
+    int win_h, col_w, win_w;
+    int cur_x;
+
+    if (ws->ntiled == 0) return;
+
+    compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
+
+    win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+    if (win_h < 1) win_h = 1;
+
+    cur_x = x_start;
+    for (i = 0; i < ws->ntiled; i++) {
+        float f = ws->tiled[i]->width_factor;
+        if (f < MIN_WIDTH_FACTOR) f = MIN_WIDTH_FACTOR;
+        if (f > MAX_WIDTH_FACTOR) f = MAX_WIDTH_FACTOR;
+        col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
+        if (col_w < MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH)
+            col_w = MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+        if (col_w > usable_w) col_w = usable_w;
+        win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (win_w < 1) win_w = 1;
+
+        ws->tiled[i]->x = cur_x + GAP_OUTER;
+        ws->tiled[i]->y = y_start + GAP_OUTER;
+        ws->tiled[i]->width = win_w;
+        ws->tiled[i]->height = win_h;
+        cur_x += col_w;
+    }
+
+    int total_w = cur_x - x_start;
+    int centered = 0;
+    if (center_focused && ws->focused) {
+        for (i = 0; i < ws->ntiled; i++) {
+            if (ws->tiled[i] == ws->focused) {
+                int outer = ws->tiled[i]->width + 2 * BORDER_WIDTH;
+                int cam_x = ws->tiled[i]->x - x_start - (usable_w - outer) / 2;
+                ws->cam_x = cam_x;
+                centered = 1;
+                break;
+            }
+        }
+    } else if (ws->focused) {
+        int cam_x = ws->cam_x;
+        for (i = 0; i < ws->ntiled; i++) {
+            if (ws->tiled[i] == ws->focused) {
+                int col = ws->tiled[i]->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+                int col_left = ws->tiled[i]->x - x_start - GAP_OUTER;
+                int col_right = col_left + col;
+                if (col_left < cam_x)
+                    cam_x = col_left;
+                else if (col_right > cam_x + usable_w)
+                    cam_x = col_right - usable_w;
+                break;
+            }
+        }
+        ws->cam_x = cam_x;
+    }
+
+    if (!centered) {
+        int cam_x = ws->cam_x;
+        if (total_w <= usable_w)
+            cam_x = 0;
+        else {
+            if (cam_x < 0) cam_x = 0;
+            if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
+        }
+        ws->cam_x = cam_x;
+    }
+
+    update_camera();
+}
+
 /* ---- tiling: master-stack layout ---- */
+/* Single-window fills the monitor.  Two or more: the first window
+   (master) occupies a fraction (master_factor) of the width on the left;
+   the remaining windows (stack) are stacked vertically on the right. */
 
 void
 tile_windows(void)
@@ -338,7 +420,6 @@ resize_window(void *arg)
         w->x = scrw / 2 - new_w / 2;
         w->y = scrh / 2 - new_h / 2;
         XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
-        XFlush(dpy);
     } else {
         tile_horizontal();
     }
@@ -369,6 +450,9 @@ fit_window(void)
 }
 
 /* ---- retile ---- */
+/* Deferred retile: multiple state changes within one event-loop iteration
+   collapse into a single retile.  retile_deferred() sets a flag;
+   flush_retile() (called once per event) performs the actual layout. */
 
 void
 retile(void)

@@ -1,3 +1,7 @@
+/* wm.c — Window management: map/unmap lifecycle, focus cycling,
+   workspace switching, swap/resize, fullscreen/float toggles, and
+   X event handlers (MapRequest, DestroyNotify, UnmapNotify, etc.). */
+
 #include "dswm.h"
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
@@ -8,6 +12,29 @@
 #include <err.h>
 
 #define NELEM(x)  (sizeof(x) / sizeof(x[0]))
+
+/* ---- workspace window list helpers ---- */
+
+static int
+wins_ensure_cap(Workspace *ws)
+{
+    if (ws->nwin >= ws->cap) {
+        int newcap = ws->cap ? ws->cap * 2 : INITIAL_CAP;
+        ManagedWindow *tmp = realloc(ws->wins, newcap * sizeof(ManagedWindow));
+        if (!tmp) return 0;
+        ws->wins = tmp;
+        ws->cap = newcap;
+    }
+    if (ws->nwin < ws->cap / 4 && ws->cap > INITIAL_CAP) {
+        int newcap = ws->cap / 2;
+        if (newcap < INITIAL_CAP) newcap = INITIAL_CAP;
+        ManagedWindow *tmp = realloc(ws->wins, newcap * sizeof(ManagedWindow));
+        if (!tmp) return 0;
+        ws->wins = tmp;
+        ws->cap = newcap;
+    }
+    return 1;
+}
 
 /* ---- focus ---- */
 
@@ -78,11 +105,14 @@ move_horizontal(int forward)
         refocus(ws, ws->tiled[idx - 1]);
     }
 
-    tile_horizontal();
+    update_camera();
 }
 
 /* ---- swap ---- */
 
+/* Swap the focused window with its neighbour in the workspace window list.
+   A struct copy (tmp) is needed because the two wins[] entries overlap
+   in memory and an in-place swap would corrupt data. */
 void
 swap_impl(int delta)
 {
@@ -140,7 +170,6 @@ show_workspace(int idx, int visible)
         else
             XUnmapWindow(dpy, ws->wins[i].window);
     }
-    XFlush(dpy);
 }
 
 void
@@ -171,6 +200,8 @@ move_to_workspace(void *arg)
     if (idx == cur_ws) return;
     if (!ws->focused) return;
 
+    /* Copy the window to the stack — memmove below invalidates the pointer
+       that ws->focused points into, so we need a local snapshot. */
     win = *ws->focused;
 
     int removed = -1;
@@ -189,13 +220,7 @@ move_to_workspace(void *arg)
     rebuild_tiled(ws);
 
     Workspace *target = &spaces[idx];
-    if (target->nwin >= target->cap) {
-        int newcap = target->cap ? target->cap * 2 : INITIAL_CAP;
-        ManagedWindow *tmp = realloc(target->wins, newcap * sizeof(ManagedWindow));
-        if (!tmp) err(1, "realloc");
-        target->wins = tmp;
-        target->cap = newcap;
-    }
+    if (!wins_ensure_cap(target)) err(1, "wins_ensure_cap");
     win.workspace = idx;
     target->wins[target->nwin++] = win;
     target->focused = &target->wins[target->nwin - 1];
@@ -219,6 +244,10 @@ move_to_workspace(void *arg)
 
 /* ---- window management ---- */
 
+/* Manage a new top-level window: query attributes, skip override-redirect
+   and special window types (desktop/dock/splash), allocate a ManagedWindow
+   in the current workspace, apply class-matching rules, subscribe to
+   events, set border, check struts, map, and tile. */
 void
 manage_window(Window w)
 {
@@ -261,7 +290,7 @@ manage_window(Window w)
     mw.saved_factor = 1.0f;
 
     if (XGetClassHint(dpy, w, &ch)) {
-        for (i = 0; i < (int)NELEM(rules); i++) {
+        for (i = 0; i < (int)num_rules; i++) {
             if (ch.res_class && strcmp(ch.res_class, rules[i].wm_class) == 0) {
                 mw.is_floating = rules[i].is_floating;
                 break;
@@ -271,13 +300,7 @@ manage_window(Window w)
         if (ch.res_name) XFree(ch.res_name);
     }
 
-    if (ws->nwin >= ws->cap) {
-        int newcap = ws->cap ? ws->cap * 2 : INITIAL_CAP;
-        ManagedWindow *tmp = realloc(ws->wins, newcap * sizeof(ManagedWindow));
-        if (!tmp) err(1, "realloc");
-        ws->wins = tmp;
-        ws->cap = newcap;
-    }
+    if (!wins_ensure_cap(ws)) err(1, "wins_ensure_cap");
 
     int insert_idx = ws->nwin;
     ws->wins[ws->nwin++] = mw;
@@ -288,15 +311,34 @@ manage_window(Window w)
     XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
     refocus(ws, &ws->wins[insert_idx]);
 
+    if (mw.workspace == cur_ws) {
+        Atom actual;
+        int fmt;
+        unsigned long n, remain;
+        unsigned char *strut_data = NULL;
+        if (XGetWindowProperty(dpy, w, atom_net_wm_strut, 0, 1, False,
+                               XA_CARDINAL, &actual, &fmt, &n, &remain,
+                               &strut_data) == Success && strut_data) {
+            XFree(strut_data);
+            curmon()->strut_valid = 0;
+        }
+    }
+
     if (mw.workspace == cur_ws)
         XMapWindow(dpy, w);
 
-    if (curmon()->horizontal_mode)
-        tile_horizontal();
-    else
-        tile_windows();
+    if (mw.workspace == cur_ws) {
+        if (curmon()->horizontal_mode)
+            tile_horizontal();
+        else
+            tile_windows();
+    }
 }
 
+/* Unmanage a window (destroyed or unmapped).  When force is true the
+   window is removed from every workspace (used on DestroyNotify);
+   otherwise only the current workspace is searched (UnmapNotify).
+   After removal, refocus the adjacent tiled window if needed. */
 void
 unmanage_window(Window w, int force)
 {
@@ -325,6 +367,8 @@ unmanage_window(Window w, int force)
 
         if (removed == -1) continue;
 
+        curmon()->strut_valid = 0;
+
         rebuild_tiled(ws);
 
         if (j == cur_ws) {
@@ -352,38 +396,30 @@ unmanage_window(Window w, int force)
 
 /* ---- focus cycling ---- */
 
+/* Move focus to the next/previous tiled window.  Both iterate the tiled[]
+   pointer array to find the current index, then shift by ±1.  In
+   horizontal mode the camera is updated to keep the focused column visible. */
 void
 focus_next(void)
 {
     Workspace *ws = curws();
     Monitor *mon = curmon();
-    int ntiled = 0, cur_tiled = -1, target = -1, i;
+    int idx = -1, i;
 
-    if (ws->nwin == 0) return;
+    if (ws->ntiled == 0) return;
 
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].monitor != mon->id || ws->wins[i].is_floating) continue;
-        if (ws->focused && ws->wins[i].window == ws->focused->window)
-            cur_tiled = ntiled;
-        ntiled++;
-    }
-    if (ntiled == 0) return;
-
-    target = (cur_tiled == -1) ? 0 : cur_tiled + 1;
-    if (target >= ntiled) return;
-
-    int count = 0;
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].monitor != mon->id || ws->wins[i].is_floating) continue;
-        if (count == target) {
-            refocus(ws, &ws->wins[i]);
+    for (i = 0; i < ws->ntiled; i++) {
+        if (ws->tiled[i] == ws->focused) {
+            idx = i;
             break;
         }
-        count++;
     }
+    if (idx == -1 || idx + 1 >= ws->ntiled) return;
+
+    refocus(ws, ws->tiled[idx + 1]);
 
     if (mon->horizontal_mode)
-        tile_horizontal();
+        update_camera();
 }
 
 void
@@ -391,33 +427,22 @@ focus_prev(void)
 {
     Workspace *ws = curws();
     Monitor *mon = curmon();
-    int ntiled = 0, cur_tiled = -1, target = -1, i;
+    int idx = -1, i;
 
-    if (ws->nwin == 0) return;
+    if (ws->ntiled == 0) return;
 
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].monitor != mon->id || ws->wins[i].is_floating) continue;
-        if (ws->focused && ws->wins[i].window == ws->focused->window)
-            cur_tiled = ntiled;
-        ntiled++;
-    }
-    if (ntiled == 0) return;
-
-    target = (cur_tiled == -1) ? ntiled - 1 : cur_tiled - 1;
-    if (target < 0) return;
-
-    int count = 0;
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].monitor != mon->id || ws->wins[i].is_floating) continue;
-        if (count == target) {
-            refocus(ws, &ws->wins[i]);
+    for (i = 0; i < ws->ntiled; i++) {
+        if (ws->tiled[i] == ws->focused) {
+            idx = i;
             break;
         }
-        count++;
     }
+    if (idx <= 0) return;
+
+    refocus(ws, ws->tiled[idx - 1]);
 
     if (mon->horizontal_mode)
-        tile_horizontal();
+        update_camera();
 }
 
 /* ---- close/quit ---- */
@@ -430,7 +455,6 @@ close_window(void)
 
     if (!ws->focused) return;
 
-    memset(&ev, 0, sizeof(ev));
     ev.xclient.type = ClientMessage;
     ev.xclient.window = ws->focused->window;
     ev.xclient.message_type = atom_wm_protocols;
@@ -494,8 +518,6 @@ toggle_fullscreen(void)
 
         retile_deferred();
     }
-
-    XFlush(dpy);
 }
 
 void
@@ -520,8 +542,6 @@ toggle_float(void)
     } else {
         retile_deferred();
     }
-
-    XFlush(dpy);
 }
 
 /* ---- spawn ---- */
@@ -541,24 +561,30 @@ spawn(void *arg)
 
 /* ---- event handlers ---- */
 
+/* MapRequest: a new window wants to be shown — manage it. */
 void
 handle_map_request(XMapRequestEvent *e)
 {
     manage_window(e->window);
 }
 
+/* DestroyNotify: window was destroyed — remove from all workspaces. */
 void
 handle_destroy_notify(XDestroyWindowEvent *e)
 {
     unmanage_window(e->window, 1);
 }
 
+/* UnmapNotify: window was unmapped — remove from current workspace. */
 void
 handle_unmap_notify(XUnmapEvent *e)
 {
     unmanage_window(e->window, 0);
 }
 
+/* ConfigureRequest: honour stacking/resize requests from managed windows.
+   Tiled windows only get stacking updates; floating/fullscreen windows
+   are allowed full geometry changes. */
 void
 handle_configure_request(XConfigureRequestEvent *e)
 {
@@ -592,6 +618,7 @@ handle_configure_request(XConfigureRequestEvent *e)
     XConfigureWindow(dpy, e->window, e->value_mask, &wc);
 }
 
+/* EnterNotify: pointer entered a managed window — refocus it. */
 void
 handle_enter_notify(XCrossingEvent *e)
 {
@@ -608,6 +635,7 @@ handle_enter_notify(XCrossingEvent *e)
     }
 }
 
+/* KeyPress: look up the key binding and dispatch the action. */
 void
 handle_key_press(XKeyEvent *e)
 {
@@ -615,7 +643,7 @@ handle_key_press(XKeyEvent *e)
     unsigned int mod = e->state & (Mod1Mask | Mod4Mask | ShiftMask | ControlMask);
     int i;
 
-    for (i = 0; i < (int)NELEM(keys); i++) {
+    for (i = 0; i < (int)num_keys; i++) {
         if (keys[i].sym == keysym && keys[i].mod == mod) {
             switch (keys[i].act) {
             case SPAWN:              spawn(keys[i].arg.v); break;
@@ -643,6 +671,7 @@ handle_key_press(XKeyEvent *e)
     }
 }
 
+/* ButtonPress: Mod4+Shift + scroll wheel scrolls the horizontal layout. */
 void
 handle_button_press(XButtonEvent *e)
 {

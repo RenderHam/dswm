@@ -1,3 +1,7 @@
+/* dswm.h — Public declarations for the dswm tiling window manager.
+   Contains types, constants, extern globals, and function prototypes.
+   Implementation lives in main.c, layout.c, and wm.c. */
+
 #ifndef DSWM_H
 #define DSWM_H
 
@@ -41,20 +45,24 @@
 
 /* ---- data structures ---- */
 
+/* Managed window descriptor — fields ordered by access frequency. */
 typedef struct ManagedWindow ManagedWindow;
 struct ManagedWindow {
+    /* hot fields: touched every tiling pass */
     Window window;
     int x, y, width, height;
-    int is_floating;
-    int is_fullscreen;
-    int workspace;
-    int monitor;
     float width_factor;
-    int is_fit;
+    /* warm fields: touched on state changes */
+    int is_floating    : 1;
+    int is_fullscreen  : 1;
+    int is_fit         : 1;
+    int pre_fs_floating : 1;
+    int workspace      : 4;
+    int monitor        : 3;
+    /* cold fields: only on fullscreen toggle / save-restore */
     float saved_factor;
     int pre_fs_x, pre_fs_y;
     int pre_fs_width, pre_fs_height;
-    int pre_fs_floating;
 };
 
 typedef struct Monitor Monitor;
@@ -88,15 +96,12 @@ typedef struct {
     int is_floating;
 } Rule;
 
-static Rule rules[] __attribute__((unused)) = {
-    { "pavucontrol",        1 },
-    { "rofi",               1 },
-    { "steam",              1 },
-    { "steamwebhelper",     1 },
-};
+extern Rule rules[];
+extern const size_t num_rules;
 
 /* ---- actions ---- */
 
+/* User actions dispatched from key bindings. */
 enum {
     SPAWN, CLOSE, QUIT,
     FOCUS_NEXT, FOCUS_PREV,
@@ -109,22 +114,24 @@ enum {
 };
 
 typedef union { int i; void *v; } Arg;
+
+/* Key binding: modifier + keysym -> action + argument. */
 typedef struct { unsigned int mod; KeySym sym; int act; Arg arg; } Key;
 
 /* ---- shell commands ---- */
 
-static const char *termcmd[] __attribute__((unused))   = { "alacritty",  NULL };
-static const char *menucmd[] __attribute__((unused))   = { "sh", "-c", "~/.config/rofi/launcher/launcher.sh", NULL };
-static const char *browsercmd[] __attribute__((unused)) = { "firefox",    NULL };
+extern const char *termcmd[];
+extern const char *menucmd[];
+extern const char *browsercmd[];
 
 /* ---- xf86 commands ---- */
 
-static const char *vol_up[]      __attribute__((unused)) = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "2%+",  NULL };
-static const char *vol_down[]    __attribute__((unused)) = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "2%-",  NULL };
-static const char *vol_mute[]    __attribute__((unused)) = { "wpctl", "set-mute",   "@DEFAULT_AUDIO_SINK@", "toggle", NULL };
-static const char *bright_up[]   __attribute__((unused)) = { "brightnessctl", "s", "2%+",  NULL };
-static const char *bright_down[] __attribute__((unused)) = { "brightnessctl", "s", "2%-",  NULL };
-static const char *dim[] __attribute__((unused)) = { "pkill", "-USR1", "redshift",  NULL };
+extern const char *vol_up[];
+extern const char *vol_down[];
+extern const char *vol_mute[];
+extern const char *bright_up[];
+extern const char *bright_down[];
+extern const char *dim[];
 
 /* ---- keybindings ---- */
 
@@ -132,38 +139,8 @@ static const char *dim[] __attribute__((unused)) = { "pkill", "-USR1", "redshift
         { MODKEY,         XK_##n, SWITCH_WORKSPACE,  { .i = n-1 } },   \
         { MODKEY|SHTKEY,  XK_##n, MOVE_TO_WORKSPACE, { .i = n-1 } }
 
-static Key keys[] __attribute__((unused)) = {
-    { MODKEY,           XK_Return, SPAWN,          { .v = termcmd  } },
-    { MODKEY,           XK_r,      SPAWN,          { .v = menucmd  } },
-    { MODKEY,           XK_b,      SPAWN,          { .v = browsercmd } },
-    { MODKEY,           XK_i,      SPAWN,          { .v = dim } },
-    { MODKEY,           XK_w,      CLOSE,          { 0 } },
-    { MODKEY|SHTKEY,    XK_q,      QUIT,           { 0 } },
-    { MODKEY,           XK_h,      FOCUS_PREV,     { 0 } },
-    { MODKEY,           XK_l,      FOCUS_NEXT,     { 0 } },
-    { MODKEY|SHTKEY,    XK_h,      SWAP_PREV,      { 0 } },
-    { MODKEY|SHTKEY,    XK_l,      SWAP_NEXT,      { 0 } },
-    { MODKEY|ControlMask, XK_h,    RESIZE_MASTER,  { .i = -RESIZE_STEP } },
-    { MODKEY|ControlMask, XK_l,    RESIZE_MASTER,  { .i = +RESIZE_STEP } },
-    { MODKEY|Mod1Mask,  XK_h,      RESIZE_WINDOW,  { .i = -1 } },
-    { MODKEY|Mod1Mask,  XK_l,      RESIZE_WINDOW,  { .i = +1 } },
-    { MODKEY,           XK_Left,   SCROLL_LEFT,    { 0 } },
-    { MODKEY,           XK_Right,  SCROLL_RIGHT,   { 0 } },
-    { MODKEY,           XK_t,      TOGGLE_LAYOUT,  { 0 } },
-    { MODKEY,           XK_f,      TOGGLE_FULLSCREEN, { 0 } },
-    { MODKEY,           XK_m,      FIT_WINDOW,     { 0 } },
-    { MODKEY,           XK_c,      TOGGLE_CENTER_FOCUS, { 0 } },
-    { MODKEY|SHTKEY,    XK_space,  TOGGLE_FLOAT,   { 0 } },
-    { MODKEY,           XK_comma,  FOCUS_MONITOR,  { .i = 0 } },
-    { MODKEY,           XK_period, FOCUS_MONITOR,  { .i = 1 } },
-    { MODKEY,           XK_slash,  FOCUS_MONITOR,  { .i = 2 } },
-    WS(1), WS(2), WS(3), WS(4), WS(5), WS(6), WS(7), WS(8), WS(9),
-    { 0, XF86XK_AudioRaiseVolume,  SPAWN, { .v = vol_up      } },
-    { 0, XF86XK_AudioLowerVolume,  SPAWN, { .v = vol_down    } },
-    { 0, XF86XK_AudioMute,         SPAWN, { .v = vol_mute    } },
-    { 0, XF86XK_MonBrightnessUp,   SPAWN, { .v = bright_up   } },
-    { 0, XF86XK_MonBrightnessDown, SPAWN, { .v = bright_down } },
-};
+extern Key keys[];
+extern const size_t num_keys;
 
 /* ---- globals (owned by main.c) ---- */
 
@@ -208,6 +185,7 @@ void tiled_add(Workspace *ws, ManagedWindow *mw);
 void tiled_remove(Workspace *ws, Window w);
 void rebuild_tiled(Workspace *ws);
 
+void update_camera(void);
 void tile_horizontal(void);
 void tile_windows(void);
 void retile(void);
