@@ -11,8 +11,8 @@ LDFLAGS     += $(X11LIBS)
 
 all: dswm dswm-session
 
-dswm: dswm.c dswm.h
-	$(CC) $(CFLAGS) -o $@ dswm.c $(LDFLAGS)
+dswm: main.c layout.c wm.c dswm.h
+	$(CC) $(CFLAGS) -o $@ main.c layout.c wm.c $(LDFLAGS)
 
 dswm-session: dswm-session.c
 	$(CC) $(CFLAGS) -o $@ dswm-session.c $(LDFLAGS)
