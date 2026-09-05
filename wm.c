@@ -218,7 +218,7 @@ move_to_workspace(void *arg)
     }
     if (!found) return;
 
-    rebuild_tiled(ws);
+    cols_rebuild(ws);
 
     Workspace *target = &spaces[idx];
     if (!wins_ensure_cap(target)) err(1, "wins_ensure_cap");
@@ -226,7 +226,7 @@ move_to_workspace(void *arg)
     target->wins[target->nwin++] = win;
     target->focused = &target->wins[target->nwin - 1];
 
-    rebuild_tiled(target);
+    cols_rebuild(target);
 
     XUnmapWindow(dpy, win.window);
 
@@ -306,7 +306,7 @@ manage_window(Window w)
     int insert_idx = ws->nwin;
     ws->wins[ws->nwin++] = mw;
 
-    rebuild_tiled(ws);
+    cols_rebuild(ws);
 
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask | PropertyChangeMask);
     XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
@@ -370,7 +370,7 @@ unmanage_window(Window w, int force)
 
         curmon()->strut_valid = 0;
 
-        rebuild_tiled(ws);
+        cols_rebuild(ws);
 
         if (j == cur_ws) {
             if (ws->nwin == 0) {
@@ -482,11 +482,6 @@ toggle_fullscreen(void)
 
     w->is_fullscreen = !w->is_fullscreen;
 
-    if (w->is_fullscreen)
-        tiled_remove(ws, w->window);
-    else if (!w->is_floating)
-        tiled_add(ws, w);
-
     if (w->is_fullscreen) {
         w->pre_fs_x = w->x;
         w->pre_fs_y = w->y;
@@ -517,6 +512,7 @@ toggle_fullscreen(void)
         XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
                         PropModeReplace, (unsigned char *)0, 0);
 
+        cols_rebuild(ws);
         retile_deferred();
     }
 }
@@ -530,17 +526,14 @@ toggle_float(void)
 
     w->is_floating = !w->is_floating;
 
-    if (w->is_floating)
-        tiled_remove(ws, w->window);
-    else
-        tiled_add(ws, w);
-
     if (w->is_floating) {
         w->x = scrw / 2 - w->width / 2;
         w->y = scrh / 2 - w->height / 2;
         XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
         XRaiseWindow(dpy, w->window);
+        cols_rebuild(ws);
     } else {
+        cols_rebuild(ws);
         retile_deferred();
     }
 }
@@ -704,51 +697,75 @@ handle_button_press(XButtonEvent *e)
     }
 }
 
-/* ButtonRelease: finalize drag — swap the dragged window with the closest
-   tiled window under the cursor, then retile.  We use center-distance
-   instead of exact bounds because the cursor often overshoots the target
-   when dragging left-to-right. */
+/* ButtonRelease: finalize drag — insert the dragged window into the
+   column under the cursor as a new row.  If the cursor is over a
+   different column, the target column splits vertically and the
+   dragged window is inserted at the row nearest the cursor.  If no
+   target column is found, the window snaps back to its original
+   position. */
 void
 handle_button_release(XButtonEvent *e)
 {
     Workspace *ws = curws();
-    int i;
-    int best_idx = -1;
-    int best_dist = INT_MAX;
-
-    (void)e;
+    Column *target_col = NULL;
+    Column *src_col = NULL;
+    int i, j, row;
 
     if (!mouse.active || !mouse.win) goto done;
 
-    /* Find the closest non-dragged tiled window to the cursor */
-    for (i = 0; i < ws->ntiled; i++) {
-        ManagedWindow *mw = ws->tiled[i];
-        if (mw == mouse.win) continue;
-        int screen_x = mw->x - ws->cam_x;
-        int cx = screen_x + mw->width / 2;
-        int cy = mw->y + mw->height / 2;
-        int dx = e->x_root - cx;
-        int dy = e->y_root - cy;
-        int dist = dx * dx + dy * dy;
-        if (dist < best_dist) {
-            best_dist = dist;
-            best_idx = i;
+    /* Find which column the cursor is over */
+    for (i = 0; i < ws->ncols; i++) {
+        Column *col = &ws->cols[i];
+        int screen_x = col->x - ws->cam_x;
+        if (e->x_root >= screen_x && e->x_root < screen_x + col->width) {
+            target_col = col;
+            break;
         }
     }
 
-    if (best_idx >= 0) {
-        /* Swap the dragged window with the closest window in tiled[] */
-        ManagedWindow *a = mouse.win;
-        ManagedWindow *b = ws->tiled[best_idx];
-        int idx_a = -1, j;
-        for (j = 0; j < ws->ntiled; j++) {
-            if (ws->tiled[j] == a) { idx_a = j; break; }
+    /* Find the source column that owns the dragged window */
+    for (i = 0; i < ws->ncols; i++) {
+        for (j = 0; j < ws->cols[i].nwin; j++) {
+            if (ws->cols[i].wins[j] == mouse.win) {
+                src_col = &ws->cols[i];
+                break;
+            }
         }
-        if (idx_a != -1) {
-            ws->tiled[idx_a] = b;
-            ws->tiled[best_idx] = a;
-        }
+        if (src_col) break;
     }
+
+    /* No target, or same column — snap back */
+    if (!target_col || !src_col || target_col == src_col)
+        goto done;
+
+    /* Compute insert row from cursor Y within the target column.
+       row 0 = top, row nwin = bottom. */
+    {
+        int usable_h = curmon()->height;
+        int gap_total = GAP_OUTER * 2 + GAP_INNER;
+        int row_h = (usable_h - 2 * GAP_OUTER
+                     - (target_col->nwin - 1) * (GAP_INNER + 2 * BORDER_WIDTH))
+                    / target_col->nwin;
+        if (row_h < MIN_WIN_DIM) row_h = MIN_WIN_DIM;
+
+        int col_y_start = target_col->wins[0]->y - GAP_OUTER;
+        int dy = e->y_root - col_y_start;
+        row = dy / (row_h + GAP_INNER + 2 * BORDER_WIDTH);
+        if (row < 0) row = 0;
+        if (row > target_col->nwin) row = target_col->nwin;
+        (void)gap_total;
+    }
+
+    /* Remove from source column */
+    col_remove_window(ws, src_col, mouse.win);
+    if (src_col->nwin == 0)
+        col_delete(ws, src_col);
+
+    /* Insert into target column at row */
+    col_insert_window(ws, target_col, mouse.win, row);
+
+    refocus(ws, mouse.win);
+    update_camera();
 
 done:
     mouse.active = 0;

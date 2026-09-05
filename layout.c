@@ -74,12 +74,124 @@ tiled_remove(Workspace *ws, Window w)
 void
 rebuild_tiled(Workspace *ws)
 {
-    int i;
+    int i, j;
     ws->ntiled = 0;
+    for (i = 0; i < ws->ncols; i++) {
+        Column *col = &ws->cols[i];
+        for (j = 0; j < col->nwin; j++) {
+            if (!tiled_ensure_cap(ws)) err(1, "rebuild_tiled");
+            ws->tiled[ws->ntiled++] = col->wins[j];
+        }
+    }
+}
+
+/* ---- column helpers ---- */
+
+int
+cols_ensure_cap(Workspace *ws)
+{
+    if (ws->ncols >= ws->col_cap) {
+        int newcap = ws->col_cap ? ws->col_cap * 2 : INITIAL_CAP;
+        Column *tmp = realloc(ws->cols, newcap * sizeof(Column));
+        if (!tmp) return 0;
+        ws->cols = tmp;
+        ws->col_cap = newcap;
+    }
+    return 1;
+}
+
+int
+col_ensure_cap(Column *col)
+{
+    if (col->nwin >= col->cap) {
+        int newcap = col->cap ? col->cap * 2 : INITIAL_CAP;
+        ManagedWindow **tmp = realloc(col->wins, newcap * sizeof(ManagedWindow *));
+        if (!tmp) return 0;
+        col->wins = tmp;
+        col->cap = newcap;
+    }
+    return 1;
+}
+
+/* Create a new single-window column and append it to the workspace. */
+int
+col_new(Workspace *ws, ManagedWindow *mw)
+{
+    Column col;
+
+    if (!cols_ensure_cap(ws)) return -1;
+    memset(&col, 0, sizeof(col));
+    col.wins = NULL;
+    col.cap = 0;
+    col.nwin = 0;
+    col.width_factor = mw->width_factor;
+
+    if (!col_ensure_cap(&col)) return -1;
+    col.wins[col.nwin++] = mw;
+    ws->cols[ws->ncols++] = col;
+    return ws->ncols - 1;
+}
+
+/* Insert a window into a column at the given row index (0..nwin).
+   The column's width_factor is preserved; the window inherits it. */
+void
+col_insert_window(Workspace *ws, Column *col, ManagedWindow *mw, int row)
+{
+    (void)ws;
+    if (!col_ensure_cap(col)) err(1, "col_insert_window");
+    if (row < 0) row = 0;
+    if (row > col->nwin) row = col->nwin;
+    memmove(&col->wins[row + 1], &col->wins[row],
+            (col->nwin - row) * sizeof(ManagedWindow *));
+    col->wins[row] = mw;
+    col->nwin++;
+    mw->width_factor = col->width_factor;
+}
+
+/* Remove a window from a column.  Does not free the column if empty. */
+void
+col_remove_window(Workspace *ws, Column *col, ManagedWindow *mw)
+{
+    int i;
+    (void)ws;
+    for (i = 0; i < col->nwin; i++) {
+        if (col->wins[i] == mw) {
+            memmove(&col->wins[i], &col->wins[i + 1],
+                    (col->nwin - i - 1) * sizeof(ManagedWindow *));
+            col->nwin--;
+            return;
+        }
+    }
+}
+
+/* Delete a column from the workspace.  Frees the wins array. */
+void
+col_delete(Workspace *ws, Column *col)
+{
+    int idx = (int)(col - ws->cols);
+    free(col->wins);
+    memmove(&ws->cols[idx], &ws->cols[idx + 1],
+            (ws->ncols - idx - 1) * sizeof(Column));
+    ws->ncols--;
+}
+
+/* Rebuild columns from the flat wins[] array.  Each non-floating,
+   non-fullscreen window becomes its own column.  Called after
+   manage/unmanage when the window list changes. */
+void
+cols_rebuild(Workspace *ws)
+{
+    int i;
+    /* Free old column data */
+    for (i = 0; i < ws->ncols; i++)
+        free(ws->cols[i].wins);
+    ws->ncols = 0;
+
     for (i = 0; i < ws->nwin; i++) {
         if (!ws->wins[i].is_floating && !ws->wins[i].is_fullscreen)
-            tiled_add(ws, &ws->wins[i]);
+            col_new(ws, &ws->wins[i]);
     }
+    rebuild_tiled(ws);
 }
 
 /* ---- bar strut support ---- */
@@ -170,39 +282,46 @@ update_camera(void)
 {
     Workspace *ws = curws();
     Monitor *mon = curmon();
-    int i;
+    int i, j;
     int usable_w, cam_x = 0, centered = 0;
 
-    if (ws->ntiled == 0) return;
+    if (ws->ncols == 0) return;
 
     usable_w = compute_usable_w(mon);
 
-    int x_start = ws->tiled[0]->x - GAP_OUTER;
-    int last = ws->ntiled - 1;
-    int total_w = ws->tiled[last]->x + ws->tiled[last]->width
+    int x_start = ws->cols[0].x - GAP_OUTER;
+    int last = ws->ncols - 1;
+    int total_w = ws->cols[last].x + ws->cols[last].width
                 + GAP_OUTER + 2 * BORDER_WIDTH - x_start;
 
     if (center_focused && ws->focused) {
-        for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == ws->focused) {
-                int outer = ws->tiled[i]->width + 2 * BORDER_WIDTH;
-                cam_x = ws->tiled[i]->x - x_start - (usable_w - outer) / 2;
-                centered = 1;
-                break;
+        for (i = 0; i < ws->ncols; i++) {
+            Column *col = &ws->cols[i];
+            for (j = 0; j < col->nwin; j++) {
+                if (col->wins[j] == ws->focused) {
+                    int outer = col->width + 2 * BORDER_WIDTH;
+                    cam_x = col->x - x_start - (usable_w - outer) / 2;
+                    centered = 1;
+                    break;
+                }
             }
+            if (centered) break;
         }
     } else if (ws->focused) {
         cam_x = ws->cam_x;
-        for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == ws->focused) {
-                int col = ws->tiled[i]->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
-                int col_left = ws->tiled[i]->x - x_start - GAP_OUTER;
-                int col_right = col_left + col;
-                if (col_left < cam_x)
-                    cam_x = col_left;
-                else if (col_right > cam_x + usable_w)
-                    cam_x = col_right - usable_w;
-                break;
+        for (i = 0; i < ws->ncols; i++) {
+            Column *col = &ws->cols[i];
+            for (j = 0; j < col->nwin; j++) {
+                if (col->wins[j] == ws->focused) {
+                    int col_total = col->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+                    int col_left = col->x - x_start - GAP_OUTER;
+                    int col_right = col_left + col_total;
+                    if (col_left < cam_x)
+                        cam_x = col_left;
+                    else if (col_right > cam_x + usable_w)
+                        cam_x = col_right - usable_w;
+                    break;
+                }
             }
         }
     } else {
@@ -219,11 +338,14 @@ update_camera(void)
     }
     ws->cam_x = cam_x;
 
-    for (i = 0; i < ws->ntiled; i++) {
-        int screen_x = ws->tiled[i]->x - cam_x;
-        XMoveResizeWindow(dpy, ws->tiled[i]->window,
-                          screen_x, ws->tiled[i]->y,
-                          ws->tiled[i]->width, ws->tiled[i]->height);
+    for (i = 0; i < ws->ncols; i++) {
+        Column *col = &ws->cols[i];
+        for (j = 0; j < col->nwin; j++) {
+            int screen_x = col->wins[j]->x - cam_x;
+            XMoveResizeWindow(dpy, col->wins[j]->window,
+                              screen_x, col->wins[j]->y,
+                              col->wins[j]->width, col->wins[j]->height);
+        }
     }
 
     XFlush(dpy);
@@ -234,21 +356,19 @@ tile_horizontal(void)
 {
     Workspace *ws = curws();
     Monitor *mon = curmon();
-    int i;
+    int i, j;
     int usable_h, usable_w, x_start, y_start;
-    int win_h, col_w, win_w;
+    int col_w, win_w, row_h;
     int cur_x;
 
-    if (ws->ntiled == 0) return;
+    if (ws->ncols == 0) return;
 
     compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
 
-    win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-    if (win_h < 1) win_h = 1;
-
     cur_x = x_start;
-    for (i = 0; i < ws->ntiled; i++) {
-        float f = ws->tiled[i]->width_factor;
+    for (i = 0; i < ws->ncols; i++) {
+        Column *col = &ws->cols[i];
+        float f = col->width_factor;
         if (f < MIN_WIDTH_FACTOR) f = MIN_WIDTH_FACTOR;
         if (f > MAX_WIDTH_FACTOR) f = MAX_WIDTH_FACTOR;
         col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
@@ -258,37 +378,66 @@ tile_horizontal(void)
         win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
         if (win_w < 1) win_w = 1;
 
-        ws->tiled[i]->x = cur_x + GAP_OUTER;
-        ws->tiled[i]->y = y_start + GAP_OUTER;
-        ws->tiled[i]->width = win_w;
-        ws->tiled[i]->height = win_h;
+        col->x = cur_x + GAP_OUTER;
+        col->width = win_w;
+
+        if (col->nwin == 1) {
+            /* Single window fills the column height */
+            col->wins[0]->x = col->x;
+            col->wins[0]->y = y_start + GAP_OUTER;
+            col->wins[0]->width = win_w;
+            col->wins[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+            if (col->wins[0]->height < 1) col->wins[0]->height = 1;
+        } else {
+            /* Multiple windows: stack vertically inside the column */
+            row_h = (usable_h - 2 * GAP_OUTER
+                     - (col->nwin - 1) * (GAP_INNER + 2 * BORDER_WIDTH))
+                    / col->nwin;
+            if (row_h < MIN_WIN_DIM) row_h = MIN_WIN_DIM;
+
+            for (j = 0; j < col->nwin; j++) {
+                col->wins[j]->x = col->x;
+                col->wins[j]->y = y_start + GAP_OUTER
+                              + j * (row_h + GAP_INNER + 2 * BORDER_WIDTH);
+                col->wins[j]->width = win_w;
+                col->wins[j]->height = row_h;
+            }
+        }
+
         cur_x += col_w;
     }
 
     int total_w = cur_x - x_start;
     int centered = 0;
     if (center_focused && ws->focused) {
-        for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == ws->focused) {
-                int outer = ws->tiled[i]->width + 2 * BORDER_WIDTH;
-                int cam_x = ws->tiled[i]->x - x_start - (usable_w - outer) / 2;
-                ws->cam_x = cam_x;
-                centered = 1;
-                break;
+        for (i = 0; i < ws->ncols; i++) {
+            Column *col = &ws->cols[i];
+            for (j = 0; j < col->nwin; j++) {
+                if (col->wins[j] == ws->focused) {
+                    int outer = col->width + 2 * BORDER_WIDTH;
+                    int cam_x = col->x - x_start - (usable_w - outer) / 2;
+                    ws->cam_x = cam_x;
+                    centered = 1;
+                    break;
+                }
             }
+            if (centered) break;
         }
     } else if (ws->focused) {
         int cam_x = ws->cam_x;
-        for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == ws->focused) {
-                int col = ws->tiled[i]->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
-                int col_left = ws->tiled[i]->x - x_start - GAP_OUTER;
-                int col_right = col_left + col;
-                if (col_left < cam_x)
-                    cam_x = col_left;
-                else if (col_right > cam_x + usable_w)
-                    cam_x = col_right - usable_w;
-                break;
+        for (i = 0; i < ws->ncols; i++) {
+            Column *col = &ws->cols[i];
+            for (j = 0; j < col->nwin; j++) {
+                if (col->wins[j] == ws->focused) {
+                    int col_total = col->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+                    int col_left = col->x - x_start - GAP_OUTER;
+                    int col_right = col_left + col_total;
+                    if (col_left < cam_x)
+                        cam_x = col_left;
+                    else if (col_right > cam_x + usable_w)
+                        cam_x = col_right - usable_w;
+                    break;
+                }
             }
         }
         ws->cam_x = cam_x;
@@ -491,15 +640,18 @@ toggle_center_focus(void)
 void
 toggle_layout(void)
 {
+    Workspace *ws = curws();
     Monitor *mon = curmon();
 
     mon->horizontal_mode = !mon->horizontal_mode;
 
     if (mon->horizontal_mode) {
         mon->master_factor = 1.0f;
+        cols_rebuild(ws);
         tile_horizontal();
     } else {
         mon->master_factor = 0.5f;
+        rebuild_tiled(ws);
         tile_windows();
     }
 }

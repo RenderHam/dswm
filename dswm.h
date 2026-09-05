@@ -86,6 +86,15 @@ struct Monitor {
     int strut_valid;
 };
 
+typedef struct Column Column;
+struct Column {
+    ManagedWindow **wins; /* pointers into Workspace.wins[] (not owned) */
+    int nwin;
+    int cap;
+    float width_factor;
+    int x, width; /* cached from last tile pass */
+};
+
 typedef struct Workspace Workspace;
 struct Workspace {
     ManagedWindow *wins;
@@ -96,6 +105,9 @@ struct Workspace {
     ManagedWindow **tiled;
     int ntiled;
     int tiled_cap;
+    Column *cols;
+    int ncols;
+    int col_cap;
 };
 
 /* ---- window rules ---- */
@@ -194,6 +206,13 @@ int  tiled_ensure_cap(Workspace *ws);
 void tiled_add(Workspace *ws, ManagedWindow *mw);
 void tiled_remove(Workspace *ws, Window w);
 void rebuild_tiled(Workspace *ws);
+
+int  cols_ensure_cap(Workspace *ws);
+void cols_rebuild(Workspace *ws);
+int  col_new(Workspace *ws, ManagedWindow *mw);
+void col_insert_window(Workspace *ws, Column *col, ManagedWindow *mw, int row);
+void col_remove_window(Workspace *ws, Column *col, ManagedWindow *mw);
+void col_delete(Workspace *ws, Column *col);
 
 void update_camera(void);
 void tile_horizontal(void);
