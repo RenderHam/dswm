@@ -7,6 +7,7 @@
 #include <X11/Xatom.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <err.h>
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -118,18 +119,19 @@ compute_struts(Monitor *mon)
     for (i = 0; i < ws->nwin; i++) {
         if (XGetWindowProperty(dpy, ws->wins[i].window, atom_net_wm_strut,
                                0, 4, False, XA_CARDINAL, &actual, &format,
-                               &nitems, &bytes_after, &data) == Success
-            && data && actual == XA_CARDINAL && format == 32 && nitems >= 4) {
-            long *strut = (long *)data;
-            if (strut[0] > 0 && ws->wins[i].x < mon->x + mon->width)
-                if (strut[0] > mon->strut_left) mon->strut_left = strut[0];
-            if (strut[1] > 0 && ws->wins[i].x + ws->wins[i].width > mon->x)
-                if (strut[1] > mon->strut_right) mon->strut_right = strut[1];
-            if (strut[2] > 0 && ws->wins[i].y < mon->y + mon->height)
-                if (strut[2] > mon->strut_top) mon->strut_top = strut[2];
-            if (strut[3] > 0 && ws->wins[i].y + ws->wins[i].height > mon->y)
-                if (strut[3] > mon->strut_bottom) mon->strut_bottom = strut[3];
-            XFree(data);
+                               &nitems, &bytes_after, &data) == Success) {
+            if (data && actual == XA_CARDINAL && format == 32 && nitems >= 4) {
+                long *strut = (long *)data;
+                if (strut[0] > 0 && ws->wins[i].x < mon->x + mon->width)
+                    if (strut[0] > mon->strut_left) mon->strut_left = strut[0];
+                if (strut[1] > 0 && ws->wins[i].x + ws->wins[i].width > mon->x)
+                    if (strut[1] > mon->strut_right) mon->strut_right = strut[1];
+                if (strut[2] > 0 && ws->wins[i].y < mon->y + mon->height)
+                    if (strut[2] > mon->strut_top) mon->strut_top = strut[2];
+                if (strut[3] > 0 && ws->wins[i].y + ws->wins[i].height > mon->y)
+                    if (strut[3] > mon->strut_bottom) mon->strut_bottom = strut[3];
+            }
+            if (data) XFree(data);
             data = NULL;
         }
     }
@@ -365,6 +367,13 @@ resize_window(void *arg)
     if (!w) return;
     if (w->is_floating || w->is_fullscreen) return;
 
+    /* In dwindle mode, use dwindle resize */
+    if (!mon->horizontal_mode && ws->dwindle_root) {
+        dwindle_resize(ws, dir, RESIZE_STEP);
+        dwindle_arrange(ws, mon);
+        return;
+    }
+
     w->width_factor += dir * RESIZE_FACTOR_STEP;
     if (w->width_factor < MIN_WIDTH_FACTOR) w->width_factor = MIN_WIDTH_FACTOR;
     if (w->width_factor > MAX_WIDTH_FACTOR) w->width_factor = MAX_WIDTH_FACTOR;
@@ -380,6 +389,7 @@ void
 fit_window(void)
 {
     Workspace *ws = active_ws();
+    Monitor *mon = curmon();
     ManagedWindow *w = ws->focused;
     if (!w) return;
 
@@ -387,6 +397,9 @@ fit_window(void)
         toggle_fullscreen();
         return;
     }
+
+    /* Only works in horizontal scroll mode */
+    if (!mon->horizontal_mode) return;
 
     if (!w->is_fit) {
         w->saved_factor = w->width_factor;
@@ -412,7 +425,7 @@ retile_ws(Workspace *ws)
     if (mon->horizontal_mode)
         tile_horizontal_ws(ws);
     else
-        tile_windows_ws(ws);
+        dwindle_arrange(ws, mon);
 }
 
 void
@@ -442,15 +455,496 @@ toggle_center_focus(void)
 void
 toggle_layout(void)
 {
+    Workspace *ws = curws();
     Monitor *mon = curmon();
+    int i;
 
     mon->horizontal_mode = !mon->horizontal_mode;
 
     if (mon->horizontal_mode) {
         mon->master_factor = 1.0f;
-        tile_horizontal_ws(curws());
+        /* Leaving dwindle: cleanup dwindle tree */
+        dwindle_cleanup(ws);
+        rebuild_tiled(ws);
+        tile_horizontal_ws(ws);
     } else {
         mon->master_factor = 0.5f;
-        tile_windows_ws(curws());
+        /* Entering dwindle: build dwindle tree from all tiled windows */
+        rebuild_tiled(ws);
+        ws->dwindle_monocle = 0;
+        for (i = 0; i < ws->ntiled; i++)
+            dwindle_insert(ws, ws->tiled[i]->window);
+        dwindle_arrange(ws, mon);
     }
+}
+
+/* ---- dwindle tree ---- */
+
+/* Look up a ManagedWindow by its X11 window ID. */
+ManagedWindow *
+dwindle_find_mw(Workspace *ws, Window w)
+{
+    int i;
+    for (i = 0; i < ws->nwin; i++)
+        if (ws->wins[i].window == w)
+            return &ws->wins[i];
+    return NULL;
+}
+
+DwindleNode *
+dwindle_node_new(Window w)
+{
+    DwindleNode *n = calloc(1, sizeof(DwindleNode));
+    if (!n) err(1, "dwindle_node_new");
+    n->win = w;
+    n->split_ratio = DWINDLE_SPLIT_RATIO;
+    n->split_type = DWINDLE_SPLIT_V;
+    return n;
+}
+
+/* Find the leaf node that stores this Window ID. */
+static DwindleNode *
+dwindle_find_leaf(DwindleNode *n, Window w)
+{
+    if (!n) return NULL;
+    if (n->win == w) return n;
+    DwindleNode *f = dwindle_find_leaf(n->first, w);
+    if (f) return f;
+    return dwindle_find_leaf(n->second, w);
+}
+
+/* Find the deepest focused leaf in the tree. */
+static DwindleNode *
+dwindle_find_focused_leaf(DwindleNode *n)
+{
+    if (!n) return NULL;
+    if (n->win) return n;
+    DwindleNode *f = dwindle_find_focused_leaf(n->second);
+    if (f) return f;
+    return dwindle_find_focused_leaf(n->first);
+}
+
+/* Insert a new window into the dwindle tree. */
+void
+dwindle_insert(Workspace *ws, Window w)
+{
+    DwindleNode *node = dwindle_node_new(w);
+    DwindleNode *anchor;
+    DwindleNode *parent;
+    DwindleNode *grandparent;
+
+    if (!ws->dwindle_root) {
+        ws->dwindle_root = node;
+        ws->dwindle_focus = node;
+        return;
+    }
+
+    anchor = ws->dwindle_focus;
+    if (!anchor || !anchor->win)
+        anchor = dwindle_find_focused_leaf(ws->dwindle_root);
+    if (!anchor) anchor = dwindle_find_leaf(ws->dwindle_root, ws->focused ? ws->focused->window : 0);
+    if (!anchor) anchor = ws->dwindle_root;
+
+    grandparent = anchor->parent;
+
+    parent = calloc(1, sizeof(DwindleNode));
+    if (!parent) err(1, "dwindle_insert");
+    parent->split_ratio = DWINDLE_SPLIT_RATIO;
+
+    /* Split type: longest side of anchor's rectangle */
+    parent->split_type = (anchor->w > anchor->h)
+                        ? DWINDLE_SPLIT_V : DWINDLE_SPLIT_H;
+
+    /* New window always goes to second child (right/bottom) */
+    parent->first = anchor;
+    parent->second = node;
+    node->parent = parent;
+    anchor->parent = parent;
+    parent->parent = grandparent;
+
+    if (grandparent) {
+        if (grandparent->first == anchor)
+            grandparent->first = parent;
+        else
+            grandparent->second = parent;
+    } else {
+        ws->dwindle_root = parent;
+    }
+
+    ws->dwindle_focus = node;
+}
+
+/* Remove a window from the dwindle tree. Brother takes parent's place. */
+void
+dwindle_remove(Workspace *ws, Window w)
+{
+    DwindleNode *leaf = dwindle_find_leaf(ws->dwindle_root, w);
+    if (!leaf) return;
+
+    DwindleNode *parent = leaf->parent;
+    if (!parent) {
+        ws->dwindle_root = NULL;
+        ws->dwindle_focus = NULL;
+        free(leaf);
+        return;
+    }
+
+    DwindleNode *brother = (parent->first == leaf) ? parent->second : parent->first;
+    brother->parent = parent->parent;
+
+    if (parent->parent) {
+        if (parent->parent->first == parent)
+            parent->parent->first = brother;
+        else
+            parent->parent->second = brother;
+    } else {
+        ws->dwindle_root = brother;
+    }
+
+    /* Adjust split type by longest side of parent's rectangle */
+    if (brother->w < brother->h)
+        brother->split_type = DWINDLE_SPLIT_H;
+    else
+        brother->split_type = DWINDLE_SPLIT_V;
+
+    if (ws->dwindle_focus == leaf || ws->dwindle_focus == parent)
+        ws->dwindle_focus = brother;
+
+    free(parent);
+    free(leaf);
+}
+
+/* Recursive rectangle layout. */
+static void
+dwindle_apply_layout(Workspace *ws, DwindleNode *n, int x, int y, int w, int h)
+{
+    if (!n) return;
+
+    n->x = x;
+    n->y = y;
+    n->w = w;
+    n->h = h;
+
+    if (n->win) {
+        ManagedWindow *mw = dwindle_find_mw(ws, n->win);
+        if (!mw) return;
+        int win_x = x + GAP_OUTER;
+        int win_y = y + GAP_OUTER;
+        int win_w = w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        int win_h = h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (win_w < 1) win_w = 1;
+        if (win_h < 1) win_h = 1;
+
+        mw->x = win_x;
+        mw->y = win_y;
+        mw->width = win_w;
+        mw->height = win_h;
+
+        XMoveResizeWindow(dpy, mw->window, mw->x, mw->y, mw->width, mw->height);
+        return;
+    }
+
+    int fence;
+    if (n->split_type == DWINDLE_SPLIT_V) {
+        fence = (int)(w * n->split_ratio);
+        if (fence < DWINDLE_MIN_NODE) fence = DWINDLE_MIN_NODE;
+        if (fence > w - DWINDLE_MIN_NODE) fence = w - DWINDLE_MIN_NODE;
+        dwindle_apply_layout(ws, n->first, x, y, fence, h);
+        dwindle_apply_layout(ws, n->second, x + fence, y, w - fence, h);
+    } else {
+        fence = (int)(h * n->split_ratio);
+        if (fence < DWINDLE_MIN_NODE) fence = DWINDLE_MIN_NODE;
+        if (fence > h - DWINDLE_MIN_NODE) fence = h - DWINDLE_MIN_NODE;
+        dwindle_apply_layout(ws, n->first, x, y, w, fence);
+        dwindle_apply_layout(ws, n->second, x, y + fence, w, h - fence);
+    }
+}
+
+/* Arrange dwindle tree on monitor. */
+void
+dwindle_arrange(Workspace *ws, Monitor *mon)
+{
+    int usable_h, usable_w, x_start, y_start;
+
+    compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
+
+    if (ws->dwindle_monocle) {
+        /* Monocle: focused window fullscreen, others hidden */
+        if (ws->dwindle_focus && ws->dwindle_focus->win) {
+            ManagedWindow *mw = dwindle_find_mw(ws, ws->dwindle_focus->win);
+            if (mw) {
+                mw->x = x_start + GAP_OUTER;
+                mw->y = y_start + GAP_OUTER;
+                mw->width = usable_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+                mw->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+                if (mw->width < 1) mw->width = 1;
+                if (mw->height < 1) mw->height = 1;
+                XMoveResizeWindow(dpy, mw->window, mw->x, mw->y, mw->width, mw->height);
+                XRaiseWindow(dpy, mw->window);
+            }
+        }
+        /* Hide all other tiled leaves */
+        {
+            DwindleNode *stack[64];
+            int top = 0;
+            DwindleNode *cur = ws->dwindle_root;
+            while (cur || top > 0) {
+                while (cur) {
+                    stack[top++] = cur;
+                    cur = cur->first;
+                }
+                cur = stack[--top];
+                if (cur->win && cur != ws->dwindle_focus) {
+                    ManagedWindow *mw = dwindle_find_mw(ws, cur->win);
+                    if (mw) XUnmapWindow(dpy, mw->window);
+                }
+                cur = cur->second;
+            }
+        }
+        return;
+    }
+
+    dwindle_apply_layout(ws, ws->dwindle_root, x_start, y_start, usable_w, usable_h);
+    XFlush(dpy);
+}
+
+/* Free all dwindle nodes. */
+static void
+dwindle_cleanup_recursive(DwindleNode *n)
+{
+    if (!n) return;
+    dwindle_cleanup_recursive(n->first);
+    dwindle_cleanup_recursive(n->second);
+    free(n);
+}
+
+void
+dwindle_cleanup(Workspace *ws)
+{
+    dwindle_cleanup_recursive(ws->dwindle_root);
+    ws->dwindle_root = NULL;
+    ws->dwindle_focus = NULL;
+}
+
+/* Find the nearest leaf in the given direction (tree-based fence traversal). */
+void
+dwindle_focus_leaf(Workspace *ws, int dir)
+{
+    if (!ws->dwindle_root || !ws->dwindle_focus || !ws->dwindle_focus->win) return;
+
+    ManagedWindow *cur = dwindle_find_mw(ws, ws->dwindle_focus->win);
+    if (!cur) return;
+
+    /* Walk up to find the nearest ancestor whose split is perpendicular
+       to the requested direction, then descend into the sibling subtree
+       to find the nearest leaf in that direction. */
+    DwindleNode *n = ws->dwindle_focus;
+    DwindleNode *best_leaf = NULL;
+    int best_dist = INT_MAX;
+
+    while (n->parent) {
+        DwindleNode *p = n->parent;
+        int perpendicular = 0;
+        if (dir == DWINDLE_DIR_WEST || dir == DWINDLE_DIR_EAST)
+            perpendicular = (p->split_type == DWINDLE_SPLIT_V);
+        else
+            perpendicular = (p->split_type == DWINDLE_SPLIT_H);
+
+        if (perpendicular) {
+            DwindleNode *sibling = (p->first == n) ? p->second : p->first;
+            /* Find the closest leaf in sibling subtree */
+            DwindleNode *stack[64];
+            int top = 0;
+            DwindleNode *c = sibling;
+            while (c || top > 0) {
+                while (c) {
+                    stack[top++] = c;
+                    c = c->first;
+                }
+                c = stack[--top];
+                if (c->win) {
+                    ManagedWindow *mw = dwindle_find_mw(ws, c->win);
+                    if (mw) {
+                        int dx = mw->x - cur->x;
+                        int dy = mw->y - cur->y;
+                        int valid = 0, dist = 0;
+                        switch (dir) {
+                        case DWINDLE_DIR_WEST:  valid = dx < 0; dist = -dx; break;
+                        case DWINDLE_DIR_EAST:  valid = dx > 0; dist = dx; break;
+                        case DWINDLE_DIR_NORTH: valid = dy < 0; dist = -dy; break;
+                        case DWINDLE_DIR_SOUTH: valid = dy > 0; dist = dy; break;
+                        }
+                        if (valid && dist < best_dist) {
+                            best_dist = dist;
+                            best_leaf = c;
+                        }
+                    }
+                }
+                c = c->second;
+            }
+            break;
+        }
+        n = p;
+    }
+
+    if (best_leaf) {
+        ws->dwindle_focus = best_leaf;
+        ManagedWindow *mw = dwindle_find_mw(ws, best_leaf->win);
+        if (mw) refocus(ws, mw);
+    }
+}
+
+/* Focus next/prev leaf via in-order traversal. */
+void
+dwindle_focus_prevnext(Workspace *ws, int delta)
+{
+    if (!ws->dwindle_root || !ws->dwindle_focus) return;
+
+    DwindleNode *leaves[128];
+    int nleaves = 0;
+
+    DwindleNode *stack[64];
+    int top = 0;
+    DwindleNode *cur = ws->dwindle_root;
+
+    while (cur || top > 0) {
+        while (cur) {
+            stack[top++] = cur;
+            cur = cur->first;
+        }
+        cur = stack[--top];
+        if (cur->win && nleaves < 128)
+            leaves[nleaves++] = cur;
+        cur = cur->second;
+    }
+
+    if (nleaves == 0) return;
+
+    int idx = 0;
+    for (int i = 0; i < nleaves; i++) {
+        if (leaves[i] == ws->dwindle_focus) {
+            idx = i;
+            break;
+        }
+    }
+
+    idx += delta;
+    if (idx < 0) idx = nleaves - 1;
+    if (idx >= nleaves) idx = 0;
+
+    ws->dwindle_focus = leaves[idx];
+    ManagedWindow *mw = dwindle_find_mw(ws, leaves[idx]->win);
+    if (mw) refocus(ws, mw);
+}
+
+/* Find the fence ancestor perpendicular to resize direction. */
+static DwindleNode *
+dwindle_find_fence(DwindleNode *leaf, int dir)
+{
+    DwindleNode *n = leaf;
+    while (n->parent) {
+        DwindleNode *p = n->parent;
+        if (dir == DWINDLE_DIR_WEST || dir == DWINDLE_DIR_EAST) {
+            if (p->split_type == DWINDLE_SPLIT_V) return p;
+        } else {
+            if (p->split_type == DWINDLE_SPLIT_H) return p;
+        }
+        n = p;
+    }
+    return NULL;
+}
+
+/* Resize: adjust split ratio of the fence ancestor. */
+void
+dwindle_resize(Workspace *ws, int dir, int delta)
+{
+    if (!ws->dwindle_focus || !ws->dwindle_focus->win) return;
+
+    /* Map keybind delta (-1/+1) to DWINDLE_DIR_* constants */
+    int d_dir;
+    if (delta < 0)
+        d_dir = DWINDLE_DIR_WEST;
+    else
+        d_dir = DWINDLE_DIR_EAST;
+
+    DwindleNode *fence = dwindle_find_fence(ws->dwindle_focus, d_dir);
+    if (!fence) return;
+
+    float step = (float)abs(delta) / 100.0f;
+    if (d_dir == DWINDLE_DIR_WEST || d_dir == DWINDLE_DIR_NORTH)
+        step = -step;
+
+    fence->split_ratio += step;
+    if (fence->split_ratio < 0.1f) fence->split_ratio = 0.1f;
+    if (fence->split_ratio > 0.9f) fence->split_ratio = 0.9f;
+
+    (void)dir;
+}
+
+/* Get the ManagedWindow of the focused dwindle leaf. */
+ManagedWindow *
+dwindle_focused_mw(Workspace *ws)
+{
+    if (ws->dwindle_focus && ws->dwindle_focus->win)
+        return dwindle_find_mw(ws, ws->dwindle_focus->win);
+    return NULL;
+}
+
+/* Set dwindle focus to the leaf containing the given window. */
+void
+dwindle_set_focus(Workspace *ws, Window w)
+{
+    if (!ws->dwindle_root) return;
+    DwindleNode *leaf = dwindle_find_leaf(ws->dwindle_root, w);
+    if (leaf) ws->dwindle_focus = leaf;
+}
+
+/* Toggle monocle sub-mode within dwindle. */
+void
+toggle_monocle(void)
+{
+    Workspace *ws = curws();
+    Monitor *mon = curmon();
+    if (mon->horizontal_mode) return;
+
+    ws->dwindle_monocle = !ws->dwindle_monocle;
+
+    /* If entering monocle, hide all non-focused tiled windows */
+    if (ws->dwindle_monocle) {
+        DwindleNode *stack[64];
+        int top = 0;
+        DwindleNode *cur = ws->dwindle_root;
+        while (cur || top > 0) {
+            while (cur) {
+                stack[top++] = cur;
+                cur = cur->first;
+            }
+            cur = stack[--top];
+            if (cur->win && cur != ws->dwindle_focus) {
+                ManagedWindow *mw = dwindle_find_mw(ws, cur->win);
+                if (mw) XUnmapWindow(dpy, mw->window);
+            }
+            cur = cur->second;
+        }
+    } else {
+        /* Exiting monocle: show all tiled windows */
+        DwindleNode *stack[64];
+        int top = 0;
+        DwindleNode *cur = ws->dwindle_root;
+        while (cur || top > 0) {
+            while (cur) {
+                stack[top++] = cur;
+                cur = cur->first;
+            }
+            cur = stack[--top];
+            if (cur->win) {
+                ManagedWindow *mw = dwindle_find_mw(ws, cur->win);
+                if (mw && !mw->is_floating && !mw->is_fullscreen)
+                    XMapWindow(dpy, mw->window);
+            }
+            cur = cur->second;
+        }
+    }
+
+    dwindle_arrange(ws, mon);
 }

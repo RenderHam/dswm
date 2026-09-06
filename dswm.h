@@ -37,6 +37,8 @@
 #define MIN_WIN_DIM        10
 #define MIN_MASTER_VERT    0.1f
 #define MAX_MASTER_VERT    0.9f
+#define DWINDLE_SPLIT_RATIO    0.5f
+#define DWINDLE_MIN_NODE       32
 
 #define MODKEY             Mod4Mask
 #define SHTKEY             ShiftMask
@@ -65,6 +67,27 @@ struct ManagedWindow {
     int pre_float_w, pre_float_h;
     int pre_float_idx;
     int pre_float_cam_x;
+};
+
+/* ---- dwindle tree node ---- */
+
+#define DWINDLE_SPLIT_V 0  /* vertical split: left/right */
+#define DWINDLE_SPLIT_H 1  /* horizontal split: top/bottom */
+
+#define DWINDLE_DIR_WEST  0
+#define DWINDLE_DIR_EAST  1
+#define DWINDLE_DIR_NORTH 2
+#define DWINDLE_DIR_SOUTH 3
+
+typedef struct DwindleNode DwindleNode;
+struct DwindleNode {
+    int split_type;       /* DWINDLE_SPLIT_V or DWINDLE_SPLIT_H */
+    float split_ratio;    /* 0.0–1.0 */
+    int x, y, w, h;      /* computed rectangle */
+    DwindleNode *parent;
+    DwindleNode *first;       /* left/top child */
+    DwindleNode *second;      /* right/bottom child */
+    Window win;           /* X11 window ID (leaf nodes only, 0 = internal) */
 };
 
 /* ---- mouse drag state ---- */
@@ -102,6 +125,10 @@ struct Workspace {
     ManagedWindow **tiled;
     int ntiled;
     int tiled_cap;
+    /* Dwindle tree (dwindle mode) */
+    DwindleNode *dwindle_root;
+    DwindleNode *dwindle_focus;
+    int dwindle_monocle;   /* monocle sub-mode within dwindle */
 };
 
 /* ---- window rules ---- */
@@ -123,8 +150,9 @@ enum {
     SWAP_PREV, SWAP_NEXT,
     RESIZE_MASTER, RESIZE_WINDOW,
     SCROLL_LEFT, SCROLL_RIGHT,
-    TOGGLE_LAYOUT, TOGGLE_FULLSCREEN, TOGGLE_FLOAT, FIT_WINDOW, TOGGLE_CENTER_FOCUS,
+    TOGGLE_LAYOUT,     TOGGLE_FULLSCREEN, TOGGLE_FLOAT, FIT_WINDOW, TOGGLE_CENTER_FOCUS,
     TOGGLE_SCRATCHPAD, MOVE_TO_SCRATCHPAD,
+    TOGGLE_MONOCLE,
     FOCUS_MONITOR,
     SWITCH_WORKSPACE, MOVE_TO_WORKSPACE,
 };
@@ -209,6 +237,21 @@ void retile_deferred(void);
 void flush_retile(void);
 void toggle_center_focus(void);
 void toggle_layout(void);
+void toggle_monocle(void);
+
+/* ---- layout.c prototypes — dwindle ---- */
+
+DwindleNode *dwindle_node_new(Window w);
+void     dwindle_insert(Workspace *ws, Window w);
+void     dwindle_remove(Workspace *ws, Window w);
+void     dwindle_arrange(Workspace *ws, Monitor *mon);
+void     dwindle_cleanup(Workspace *ws);
+void     dwindle_focus_leaf(Workspace *ws, int dir);
+void     dwindle_focus_prevnext(Workspace *ws, int delta);
+void     dwindle_resize(Workspace *ws, int dir, int delta);
+ManagedWindow *dwindle_focused_mw(Workspace *ws);
+ManagedWindow *dwindle_find_mw(Workspace *ws, Window w);
+void           dwindle_set_focus(Workspace *ws, Window w);
 
 /* ---- wm.c prototypes ---- */
 

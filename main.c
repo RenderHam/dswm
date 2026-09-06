@@ -104,6 +104,7 @@ Key keys[] = {
     { MODKEY,           XK_slash,  FOCUS_MONITOR,  { .i = 2 } },
     { MODKEY,           XK_grave,  TOGGLE_SCRATCHPAD, { 0 } },
     { MODKEY|SHTKEY,    XK_grave,  MOVE_TO_SCRATCHPAD, { 0 } },
+    { MODKEY|SHTKEY,    XK_m,      TOGGLE_MONOCLE,   { 0 } },
     WS(1), WS(2), WS(3), WS(4), WS(5), WS(6), WS(7), WS(8), WS(9),
     { 0, XF86XK_AudioRaiseVolume,  SPAWN, { .v = vol_up      } },
     { 0, XF86XK_AudioLowerVolume,  SPAWN, { .v = vol_down    } },
@@ -343,6 +344,7 @@ cleanup(void)
 {
     int i;
     for (i = 0; i < NUM_WORKSPACES + 1; i++) {
+        dwindle_cleanup(&spaces[i]);
         free(spaces[i].wins);
         free(spaces[i].tiled);
         spaces[i].wins = NULL;

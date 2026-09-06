@@ -196,6 +196,10 @@ move_to_workspace(void *arg)
        that ws->focused points into, so we need a local snapshot. */
     win = *ws->focused;
 
+    /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
+    if (!curmon()->horizontal_mode)
+        dwindle_remove(ws, win.window);
+
     int removed = -1;
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == win.window) {
@@ -218,6 +222,10 @@ move_to_workspace(void *arg)
     target->focused = &target->wins[target->nwin - 1];
 
     rebuild_tiled(target);
+
+    /* Insert into dwindle tree on target workspace if in dwindle mode */
+    if (!curmon()->horizontal_mode)
+        dwindle_insert(target, win.window);
 
     XUnmapWindow(dpy, win.window);
 
@@ -259,15 +267,18 @@ manage_window(Window w)
     unsigned char *data = NULL;
     if (XGetWindowProperty(dpy, w, atom_net_wm_window_type, 0, 1, False,
                            XA_ATOM, &actual, &fmt, &n, &remain,
-                           &data) == Success && data
-        && actual == XA_ATOM && fmt == 32 && n >= 1) {
-        Atom type = *(Atom *)data;
-        XFree(data);
-        if (type == atom_net_wm_type_desktop ||
-            type == atom_net_wm_type_dock ||
-            type == atom_net_wm_type_splash) {
-            XMapWindow(dpy, w);
-            return;
+                           &data) == Success) {
+        if (data && actual == XA_ATOM && fmt == 32 && n >= 1) {
+            Atom type = *(Atom *)data;
+            XFree(data);
+            if (type == atom_net_wm_type_desktop ||
+                type == atom_net_wm_type_dock ||
+                type == atom_net_wm_type_splash) {
+                XMapWindow(dpy, w);
+                return;
+            }
+        } else if (data) {
+            XFree(data);
         }
     }
 
@@ -313,6 +324,13 @@ manage_window(Window w)
     ws->nwin++;
 
     rebuild_tiled(ws);
+
+    /* In dwindle mode, insert window into dwindle tree */
+    {
+        Monitor *mon = curmon();
+        if (!mon->horizontal_mode)
+            dwindle_insert(ws, w);
+    }
 
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask | PropertyChangeMask);
     XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
@@ -362,6 +380,9 @@ unmanage_window(Window w, int force)
         for (i = 0; i < ws->nwin; i++) {
             if (ws->wins[i].window == w) {
                 removed = i;
+                /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
+                if (!curmon()->horizontal_mode)
+                    dwindle_remove(ws, w);
                 memmove(&ws->wins[i], &ws->wins[i + 1],
                         (ws->nwin - i - 1) * sizeof(ManagedWindow));
                 ws->nwin--;
@@ -409,6 +430,12 @@ focus_cycle(int delta)
     Workspace *ws = active_ws();
     Monitor *mon = curmon();
     int idx = -1, i;
+
+    /* In dwindle mode, use tree-based focus */
+    if (!mon->horizontal_mode && ws->dwindle_root) {
+        dwindle_focus_prevnext(ws, delta);
+        return;
+    }
 
     if (ws->ntiled == 0) return;
 
@@ -465,10 +492,16 @@ toggle_fullscreen(void)
 
     w->is_fullscreen = !w->is_fullscreen;
 
-    if (w->is_fullscreen)
+    if (w->is_fullscreen) {
         tiled_remove(ws, w->window);
-    else if (!w->is_floating)
+        if (!curmon()->horizontal_mode)
+            dwindle_remove(ws, w->window);
+    } else {
+        /* Re-insert into layout BEFORE restoring is_floating */
         tiled_add(ws, w);
+        if (!curmon()->horizontal_mode)
+            dwindle_insert(ws, w->window);
+    }
 
     if (w->is_fullscreen) {
         w->pre_fs_x = w->x;
@@ -529,6 +562,8 @@ toggle_float(void)
         w->pre_float_cam_x = ws->cam_x;
 
         tiled_remove(ws, w->window);
+        if (!mon->horizontal_mode)
+            dwindle_remove(ws, w->window);
         w->is_floating = 1;
 
         /* Center on the current monitor (not global scrw/scrh) */
@@ -554,6 +589,10 @@ toggle_float(void)
         ws->tiled[idx] = w;
         ws->ntiled++;
 
+        /* Re-insert into dwindle tree if in dwindle mode */
+        if (!mon->horizontal_mode)
+            dwindle_insert(ws, w->window);
+
         /* Retile in the correct layout mode so snap-back works in both
            scrolling and stacking layouts. */
         if (ws == &spaces[SCRATCHPAD_IDX]) {
@@ -561,7 +600,7 @@ toggle_float(void)
         } else if (mon->horizontal_mode) {
             tile_horizontal_ws(ws);
         } else {
-            tile_windows_ws(ws);
+            retile_deferred();
         }
     }
 }
@@ -652,6 +691,10 @@ move_to_scratchpad(void)
 
     win = *src->focused;
 
+    /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
+    if (!curmon()->horizontal_mode)
+        dwindle_remove(src, win.window);
+
     int removed = -1;
     for (i = 0; i < src->nwin; i++) {
         if (src->wins[i].window == win.window) {
@@ -672,6 +715,8 @@ move_to_scratchpad(void)
     dst->wins[dst->nwin++] = win;
 
     rebuild_tiled(dst);
+
+    /* Skip dwindle for scratchpad — it has its own workspace layout */
 
     if (scratch_visible) {
         /* Window appears immediately in the overlay */
@@ -883,6 +928,12 @@ handle_enter_notify(XCrossingEvent *e)
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].window == e->window) {
             refocus(ws, &ws->wins[i]);
+            /* Update dwindle focus if in dwindle mode */
+            {
+                Monitor *mon = curmon();
+                if (!mon->horizontal_mode && ws->dwindle_root)
+                    dwindle_set_focus(ws, e->window);
+            }
             break;
         }
     }
@@ -917,6 +968,7 @@ handle_key_press(XKeyEvent *e)
             case MOVE_TO_SCRATCHPAD: move_to_scratchpad(); break;
             case FIT_WINDOW:         fit_window(); break;
             case TOGGLE_CENTER_FOCUS: toggle_center_focus(); break;
+            case TOGGLE_MONOCLE:      toggle_monocle(); break;
             case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
             case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
             case FOCUS_MONITOR:      focus_monitor((void *)(long)keys[i].arg.i); break;
