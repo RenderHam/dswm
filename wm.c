@@ -295,8 +295,22 @@ manage_window(Window w)
 
     if (!wins_ensure_cap(ws)) err(1, "wins_ensure_cap");
 
+    /* Insert after focused window so it appears next in tiled order.
+       Falls back to appending if no focused window. */
     int insert_idx = ws->nwin;
-    ws->wins[ws->nwin++] = mw;
+    if (ws->focused) {
+        for (i = 0; i < ws->nwin; i++) {
+            if (&ws->wins[i] == ws->focused) {
+                insert_idx = i + 1;
+                break;
+            }
+        }
+    }
+    if (insert_idx < ws->nwin)
+        memmove(&ws->wins[insert_idx + 1], &ws->wins[insert_idx],
+                (ws->nwin - insert_idx) * sizeof(ManagedWindow));
+    ws->wins[insert_idx] = mw;
+    ws->nwin++;
 
     rebuild_tiled(ws);
 
