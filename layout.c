@@ -119,7 +119,7 @@ compute_struts(Monitor *mon)
         if (XGetWindowProperty(dpy, ws->wins[i].window, atom_net_wm_strut,
                                0, 4, False, XA_CARDINAL, &actual, &format,
                                &nitems, &bytes_after, &data) == Success
-            && data && nitems >= 4) {
+            && data && actual == XA_CARDINAL && format == 32 && nitems >= 4) {
             long *strut = (long *)data;
             if (strut[0] > 0 && ws->wins[i].x < mon->x + mon->width)
                 if (strut[0] > mon->strut_left) mon->strut_left = strut[0];
@@ -138,95 +138,20 @@ compute_struts(Monitor *mon)
 }
 
 /* Compute the rectangular region of the monitor that is usable for tiling,
-   after subtracting the built-in bar height and external struts. */
+   after subtracting external struts. */
 static void
 compute_usable_area(Monitor *mon, int *usable_w, int *usable_h,
                     int *x_start, int *y_start)
 {
-    int own_bar_top = 0, own_bar_bottom = 0;
-
-    if (BAR_POSITION == 0)
-        own_bar_top = BAR_HEIGHT;
-    else
-        own_bar_bottom = BAR_HEIGHT;
-
     compute_struts(mon);
 
-    *usable_h = mon->height - MAX(own_bar_top, mon->strut_top)
-                       - MAX(own_bar_bottom, mon->strut_bottom);
+    *usable_h = mon->height - mon->strut_top - mon->strut_bottom;
     *usable_w = mon->width - mon->strut_left - mon->strut_right;
     *x_start  = mon->x + mon->strut_left;
-    *y_start  = mon->y + MAX(own_bar_top, mon->strut_top);
+    *y_start  = mon->y + mon->strut_top;
 
     if (*usable_h < MIN_WIN_DIM) *usable_h = mon->height;
     if (*usable_w < MIN_WIN_DIM) *usable_w = mon->width;
-}
-
-/* Public version for scratchpad: compute usable area and position each
-   tiled window in the given workspace.  Used by toggle_scratchpad
-   which operates outside the current-workspace context. */
-void
-compute_usable_area_ws(Monitor *mon, Workspace *ws)
-{
-    int usable_h, usable_w, x_start, y_start;
-    int i;
-
-    compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
-
-    if (mon->horizontal_mode) {
-        int win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        if (win_h < 1) win_h = 1;
-        int cur_x = x_start;
-        for (i = 0; i < ws->ntiled; i++) {
-            float f = ws->tiled[i]->width_factor;
-            if (f < MIN_WIDTH_FACTOR) f = MIN_WIDTH_FACTOR;
-            if (f > MAX_WIDTH_FACTOR) f = MAX_WIDTH_FACTOR;
-            int col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
-            if (col_w < MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH)
-                col_w = MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
-            if (col_w > usable_w) col_w = usable_w;
-            int win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            if (win_w < 1) win_w = 1;
-            ws->tiled[i]->x = cur_x + GAP_OUTER;
-            ws->tiled[i]->y = y_start + GAP_OUTER;
-            ws->tiled[i]->width = win_w;
-            ws->tiled[i]->height = win_h;
-            cur_x += col_w;
-        }
-    } else {
-        if (ws->ntiled == 1) {
-            ws->tiled[0]->x = x_start + GAP_OUTER;
-            ws->tiled[0]->y = y_start + GAP_OUTER;
-            ws->tiled[0]->width = usable_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            ws->tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            if (ws->tiled[0]->width < 1) ws->tiled[0]->width = 1;
-            if (ws->tiled[0]->height < 1) ws->tiled[0]->height = 1;
-        } else {
-            int master_w = (int)(usable_w * mon->master_factor)
-                           - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
-            int stack_x  = x_start + (int)(usable_w * mon->master_factor) + GAP_INNER;
-            int stack_w  = usable_w - (int)(usable_w * mon->master_factor)
-                           - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
-            int stack_h;
-            if (master_w < 1) master_w = 1;
-            if (stack_w < 1) stack_w = 1;
-            stack_h = (usable_h - GAP_OUTER * 2 - GAP_INNER * (ws->ntiled - 1))
-                      / (ws->ntiled - 1) - 2 * BORDER_WIDTH;
-            if (stack_h < 1) stack_h = 1;
-            ws->tiled[0]->x = x_start + GAP_OUTER;
-            ws->tiled[0]->y = y_start + GAP_OUTER;
-            ws->tiled[0]->width = master_w;
-            ws->tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-            if (ws->tiled[0]->height < 1) ws->tiled[0]->height = 1;
-            for (i = 1; i < ws->ntiled; i++) {
-                ws->tiled[i]->x = stack_x;
-                ws->tiled[i]->y = y_start + GAP_OUTER
-                    + (i - 1) * (stack_h + GAP_INNER + 2 * BORDER_WIDTH);
-                ws->tiled[i]->width = stack_w;
-                ws->tiled[i]->height = stack_h;
-            }
-        }
-    }
 }
 
 /* ---- tiling: horizontal scroll layout (infinite canvas) ---- */
@@ -306,12 +231,6 @@ update_camera_ws(Workspace *ws)
 }
 
 void
-update_camera(void)
-{
-    update_camera_ws(curws());
-}
-
-void
 tile_horizontal_ws(Workspace *ws)
 {
     Monitor *mon = curmon();
@@ -346,53 +265,7 @@ tile_horizontal_ws(Workspace *ws)
         cur_x += col_w;
     }
 
-    int total_w = cur_x - x_start;
-    int centered = 0;
-    if (center_focused && ws->focused) {
-        for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == ws->focused) {
-                int outer = ws->tiled[i]->width + 2 * BORDER_WIDTH;
-                int cam_x = ws->tiled[i]->x - x_start - (usable_w - outer) / 2;
-                ws->cam_x = cam_x;
-                centered = 1;
-                break;
-            }
-        }
-    } else if (ws->focused) {
-        int cam_x = ws->cam_x;
-        for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == ws->focused) {
-                int col = ws->tiled[i]->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
-                int col_left = ws->tiled[i]->x - x_start - GAP_OUTER;
-                int col_right = col_left + col;
-                if (col_left < cam_x)
-                    cam_x = col_left;
-                else if (col_right > cam_x + usable_w)
-                    cam_x = col_right - usable_w;
-                break;
-            }
-        }
-        ws->cam_x = cam_x;
-    }
-
-    if (!centered) {
-        int cam_x = ws->cam_x;
-        if (total_w <= usable_w)
-            cam_x = 0;
-        else {
-            if (cam_x < 0) cam_x = 0;
-            if (cam_x > total_w - usable_w) cam_x = total_w - usable_w;
-        }
-        ws->cam_x = cam_x;
-    }
-
     update_camera_ws(ws);
-}
-
-void
-tile_horizontal(void)
-{
-    tile_horizontal_ws(curws());
 }
 
 /* ---- tiling: master-stack layout ---- */
@@ -460,12 +333,6 @@ tile_windows_ws(Workspace *ws)
     XFlush(dpy);
 }
 
-void
-tile_windows(void)
-{
-    tile_windows_ws(curws());
-}
-
 /* ---- resize ---- */
 
 void
@@ -484,7 +351,7 @@ resize_master(void *arg)
     if (mon->master_factor < MIN_MASTER_VERT) mon->master_factor = MIN_MASTER_VERT;
     if (mon->master_factor > MAX_MASTER_VERT) mon->master_factor = MAX_MASTER_VERT;
 
-    tile_windows();
+    tile_windows_ws(ws);
 }
 
 void
@@ -530,7 +397,7 @@ fit_window(void)
         w->width_factor = w->saved_factor;
         w->is_fit = 0;
     }
-    tile_horizontal();
+    tile_horizontal_ws(ws);
 }
 
 /* ---- retile ---- */
@@ -539,13 +406,13 @@ fit_window(void)
    flush_retile() (called once per event) performs the actual layout. */
 
 void
-retile(void)
+retile_ws(Workspace *ws)
 {
     Monitor *mon = curmon();
     if (mon->horizontal_mode)
-        tile_horizontal();
+        tile_horizontal_ws(ws);
     else
-        tile_windows();
+        tile_windows_ws(ws);
 }
 
 void
@@ -559,7 +426,7 @@ flush_retile(void)
 {
     if (retile_pending) {
         retile_pending = 0;
-        retile();
+        retile_ws(curws());
     }
 }
 
@@ -569,7 +436,7 @@ void
 toggle_center_focus(void)
 {
     center_focused = !center_focused;
-    retile();
+    retile_ws(curws());
 }
 
 void
@@ -581,9 +448,9 @@ toggle_layout(void)
 
     if (mon->horizontal_mode) {
         mon->master_factor = 1.0f;
-        tile_horizontal();
+        tile_horizontal_ws(curws());
     } else {
         mon->master_factor = 0.5f;
-        tile_windows();
+        tile_windows_ws(curws());
     }
 }

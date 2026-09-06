@@ -7,7 +7,6 @@
 
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
-#include <X11/XF86keysym.h>
 
 #define MAJOR_VERSION 1
 #define MINOR_VERSION 0
@@ -30,16 +29,12 @@
 #define MIN_WIDTH_FACTOR   0.3f
 #define MAX_WIDTH_FACTOR   3.0f
 
-#define BAR_POSITION       0
-#define BAR_HEIGHT         0
-
 #define CENTER_FOCUSED_DEFAULT 0
 
 #define USE_XINERAMA       1
 
 #define INITIAL_CAP        16
 #define MIN_WIN_DIM        10
-#define FLOAT_STEP         20
 #define MIN_MASTER_VERT    0.1f
 #define MAX_MASTER_VERT    0.9f
 
@@ -156,10 +151,6 @@ extern const char *dim[];
 
 /* ---- keybindings ---- */
 
-#define WS(n)                                                          \
-        { MODKEY,         XK_##n, SWITCH_WORKSPACE,  { .i = n-1 } },   \
-        { MODKEY|SHTKEY,  XK_##n, MOVE_TO_WORKSPACE, { .i = n-1 } }
-
 extern Key keys[];
 extern const size_t num_keys;
 
@@ -210,14 +201,10 @@ void tiled_add(Workspace *ws, ManagedWindow *mw);
 void tiled_remove(Workspace *ws, Window w);
 void rebuild_tiled(Workspace *ws);
 
-void update_camera(void);
 void update_camera_ws(Workspace *ws);
-void tile_horizontal(void);
 void tile_horizontal_ws(Workspace *ws);
-void tile_windows(void);
 void tile_windows_ws(Workspace *ws);
-void compute_usable_area_ws(Monitor *mon, Workspace *ws);
-void retile(void);
+void retile_ws(Workspace *ws);
 void retile_deferred(void);
 void flush_retile(void);
 void toggle_center_focus(void);
@@ -226,19 +213,16 @@ void toggle_layout(void);
 /* ---- wm.c prototypes ---- */
 
 void update_border(Window w, int focused);
-void refocus(Workspace *ws, ManagedWindow *new);
+void refocus(Workspace *ws, ManagedWindow *next);
 void focus_monitor(void *arg);
 void move_horizontal(int forward);
 void swap_impl(int delta);
-void swap_next(void);
-void swap_prev(void);
 void show_workspace(int idx, int visible);
 void switch_workspace(void *arg);
 void move_to_workspace(void *arg);
 void manage_window(Window w);
 void unmanage_window(Window w, int force);
-void focus_next(void);
-void focus_prev(void);
+void focus_cycle(int delta);
 void close_window(void);
 void quit_wm(void);
 void toggle_fullscreen(void);

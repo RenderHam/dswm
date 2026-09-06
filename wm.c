@@ -26,18 +26,8 @@ wins_ensure_cap(Workspace *ws)
         ws->wins = tmp;
         ws->cap = newcap;
     }
-    if (ws->nwin < ws->cap / 4 && ws->cap > INITIAL_CAP) {
-        int newcap = ws->cap / 2;
-        if (newcap < INITIAL_CAP) newcap = INITIAL_CAP;
-        ManagedWindow *tmp = realloc(ws->wins, newcap * sizeof(ManagedWindow));
-        if (!tmp) return 0;
-        ws->wins = tmp;
-        ws->cap = newcap;
-    }
     return 1;
 }
-
-static void retile_scratchpad(void);
 
 /* ---- focus ---- */
 
@@ -46,17 +36,17 @@ update_border(Window w, int focused)
 {
     XSetWindowBorder(dpy, w, focused ? FOCUS_COLOR : BORDER_COLOR);
 }
-
 void
-refocus(Workspace *ws, ManagedWindow *new)
+refocus(Workspace *ws, ManagedWindow *next)
 {
-    if (ws->focused && ws->focused != new)
+    if (ws->focused && ws->focused != next)
         update_border(ws->focused->window, 0);
-    ws->focused = new;
-    if (new) {
-        update_border(new->window, 1);
-        XSetInputFocus(dpy, new->window, RevertToPointerRoot, CurrentTime);
-        XRaiseWindow(dpy, new->window);
+
+    ws->focused = next;
+    if (next) {
+        update_border(next->window, 1);
+        XSetInputFocus(dpy, next->window, RevertToPointerRoot, CurrentTime);
+        XRaiseWindow(dpy, next->window);
     }
 }
 
@@ -74,7 +64,7 @@ focus_monitor(void *arg)
     cur_ws = mons[mon_idx].current_workspace;
     show_workspace(cur_ws, 1);
 
-    retile();
+    retile_ws(curws());
 
     update_ewmh_current_desktop();
 }
@@ -108,7 +98,7 @@ move_horizontal(int forward)
         refocus(ws, ws->tiled[idx - 1]);
     }
 
-    update_camera();
+    update_camera_ws(curws());
 }
 
 /* ---- swap ---- */
@@ -145,18 +135,6 @@ swap_impl(int delta)
 
     ws->focused = &ws->wins[swap_idx];
     refocus(ws, ws->focused);
-}
-
-void
-swap_next(void)
-{
-    swap_impl(1);
-}
-
-void
-swap_prev(void)
-{
-    swap_impl(-1);
 }
 
 /* ---- workspace management ---- */
@@ -197,7 +175,7 @@ switch_workspace(void *arg)
     cur_ws = idx;
     show_workspace(cur_ws, 1);
 
-    retile();
+    retile_ws(curws());
 
     update_ewmh_current_desktop();
 }
@@ -253,7 +231,7 @@ move_to_workspace(void *arg)
         update_border(ws->focused->window, 1);
         XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
     }
-    retile();
+    retile_ws(curws());
 }
 
 /* ---- window management ---- */
@@ -281,7 +259,8 @@ manage_window(Window w)
     unsigned char *data = NULL;
     if (XGetWindowProperty(dpy, w, atom_net_wm_window_type, 0, 1, False,
                            XA_ATOM, &actual, &fmt, &n, &remain,
-                           &data) == Success && data) {
+                           &data) == Success && data
+        && actual == XA_ATOM && fmt == 32 && n >= 1) {
         Atom type = *(Atom *)data;
         XFree(data);
         if (type == atom_net_wm_type_desktop ||
@@ -342,12 +321,7 @@ manage_window(Window w)
         XMapWindow(dpy, w);
 
     if (mw.workspace == cur_ws || ws == &spaces[SCRATCHPAD_IDX]) {
-        if (ws == &spaces[SCRATCHPAD_IDX])
-            tile_horizontal_ws(ws);
-        else if (curmon()->horizontal_mode)
-            tile_horizontal();
-        else
-            tile_windows();
+        retile_ws(ws);
     }
 }
 
@@ -416,7 +390,7 @@ unmanage_window(Window w, int force)
    pointer array to find the current index, then shift by ±1.  In
    horizontal mode the camera is updated to keep the focused column visible. */
 void
-focus_next(void)
+focus_cycle(int delta)
 {
     Workspace *ws = active_ws();
     Monitor *mon = curmon();
@@ -430,35 +404,15 @@ focus_next(void)
             break;
         }
     }
-    if (idx == -1 || idx + 1 >= ws->ntiled) return;
+    if (idx == -1) return;
 
-    refocus(ws, ws->tiled[idx + 1]);
+    int new_idx = idx + delta;
+    if (new_idx < 0 || new_idx >= ws->ntiled) return;
 
-    if (mon->horizontal_mode)
-        update_camera();
-}
-
-void
-focus_prev(void)
-{
-    Workspace *ws = active_ws();
-    Monitor *mon = curmon();
-    int idx = -1, i;
-
-    if (ws->ntiled == 0) return;
-
-    for (i = 0; i < ws->ntiled; i++) {
-        if (ws->tiled[i] == ws->focused) {
-            idx = i;
-            break;
-        }
-    }
-    if (idx <= 0) return;
-
-    refocus(ws, ws->tiled[idx - 1]);
+    refocus(ws, ws->tiled[new_idx]);
 
     if (mon->horizontal_mode)
-        update_camera();
+        update_camera_ws(curws());
 }
 
 /* ---- close/quit ---- */
@@ -571,7 +525,7 @@ toggle_float(void)
 
         /* Retile the remaining tiled windows */
         if (ws == &spaces[SCRATCHPAD_IDX])
-            retile_scratchpad();
+            retile_ws(&spaces[SCRATCHPAD_IDX]);
         else
             retile_deferred();
     } else {
@@ -589,7 +543,7 @@ toggle_float(void)
         /* Retile in the correct layout mode so snap-back works in both
            scrolling and stacking layouts. */
         if (ws == &spaces[SCRATCHPAD_IDX]) {
-            retile_scratchpad();
+            retile_ws(&spaces[SCRATCHPAD_IDX]);
         } else if (mon->horizontal_mode) {
             tile_horizontal_ws(ws);
         } else {
@@ -631,21 +585,6 @@ parse_dim_color(unsigned int hex, unsigned char *r, unsigned char *g,
     *g = (hex >> 16) & 0xFF;
     *b = (hex >> 8)  & 0xFF;
     *a =  hex        & 0xFF;
-}
-
-/* Scratchpad tile: runs tile_horizontal or tile_windows on the scratchpad
-   workspace, same as retile() but on spaces[SCRATCHPAD_IDX] instead of
-   the current workspace. */
-static void
-retile_scratchpad(void)
-{
-    Workspace *ws = &spaces[SCRATCHPAD_IDX];
-    Monitor *mon = curmon();
-
-    if (mon->horizontal_mode)
-        tile_horizontal_ws(ws);
-    else
-        tile_windows_ws(ws);
 }
 
 /* Scratchpad overlay raise: map + raise every window in the scratchpad
@@ -725,7 +664,7 @@ move_to_scratchpad(void)
         ManagedWindow *nw = &dst->wins[dst->nwin - 1];
         XMapWindow(dpy, nw->window);
         XRaiseWindow(dpy, nw->window);
-        retile_scratchpad();
+        retile_ws(&spaces[SCRATCHPAD_IDX]);
     } else {
         /* Hidden until next toggle */
         XUnmapWindow(dpy, win.window);
@@ -797,10 +736,7 @@ toggle_scratchpad(void)
                 mon->dim_colormap = 0;
         }
 
-        /* Compute usable area for scratchpad layout */
-        compute_usable_area_ws(mon, ws);
-
-        retile_scratchpad();
+        retile_ws(&spaces[SCRATCHPAD_IDX]);
         scratch_raise_all();
 
         /* Focus the last-focused scratchpad window, or first */
@@ -952,10 +888,10 @@ handle_key_press(XKeyEvent *e)
             case SPAWN:              spawn(keys[i].arg.v); break;
             case CLOSE:              close_window(); break;
             case QUIT:               quit_wm(); break;
-            case FOCUS_NEXT:         focus_next(); break;
-            case FOCUS_PREV:         focus_prev(); break;
-            case SWAP_NEXT:          swap_next(); break;
-            case SWAP_PREV:          swap_prev(); break;
+            case FOCUS_NEXT:         focus_cycle(1); break;
+            case FOCUS_PREV:         focus_cycle(-1); break;
+            case SWAP_NEXT:          swap_impl(1); break;
+            case SWAP_PREV:          swap_impl(-1); break;
             case RESIZE_MASTER:      resize_master((void *)(long)keys[i].arg.i); break;
             case RESIZE_WINDOW:      resize_window((void *)(long)keys[i].arg.i); break;
             case SCROLL_LEFT:        move_horizontal(0); break;
@@ -974,6 +910,28 @@ handle_key_press(XKeyEvent *e)
             break;
         }
     }
+}
+
+/* ---- mouse grab helper ---- */
+
+static void
+grab_mouse(ManagedWindow *mw, int resizing, XButtonEvent *e)
+{
+    mouse.active = 1;
+    mouse.resizing = resizing;
+    mouse.win = mw;
+    mouse.start_x = e->x_root;
+    mouse.start_y = e->y_root;
+    if (resizing) {
+        mouse.orig_w = mw->width;
+        mouse.orig_h = mw->height;
+    } else {
+        mouse.orig_x = mw->x;
+        mouse.orig_y = mw->y;
+    }
+    XGrabPointer(dpy, root, True,
+                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                 GrabModeAsync, GrabModeAsync, None, None, e->time);
 }
 
 /* ButtonPress: Super+Button1 moves/drag-swaps, Super+Button3 resizes.
@@ -999,16 +957,7 @@ handle_button_press(XButtonEvent *e)
             int ry = mw->y + mw->height - 16;
             if (e->x_root >= rx && e->x_root < mw->x + mw->width
                 && e->y_root >= ry && e->y_root < mw->y + mw->height) {
-                mouse.active = 1;
-                mouse.resizing = 1;
-                mouse.win = mw;
-                mouse.start_x = e->x_root;
-                mouse.start_y = e->y_root;
-                mouse.orig_w = mw->width;
-                mouse.orig_h = mw->height;
-                XGrabPointer(dpy, root, True,
-                             ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                             GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+                grab_mouse(mw, 1, e);
                 return;
             }
         }
@@ -1019,16 +968,7 @@ handle_button_press(XButtonEvent *e)
             if (!mw->is_floating || mw->is_fullscreen) continue;
             if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
                 && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-                mouse.active = 1;
-                mouse.resizing = 1;
-                mouse.win = mw;
-                mouse.start_x = e->x_root;
-                mouse.start_y = e->y_root;
-                mouse.orig_w = mw->width;
-                mouse.orig_h = mw->height;
-                XGrabPointer(dpy, root, True,
-                             ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                             GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+                grab_mouse(mw, 1, e);
                 return;
             }
         }
@@ -1044,16 +984,7 @@ handle_button_press(XButtonEvent *e)
             int screen_x = mw->x - ws->cam_x;
             if (e->x_root >= screen_x && e->x_root < screen_x + mw->width
                 && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-                mouse.active = 1;
-                mouse.resizing = 0;
-                mouse.win = mw;
-                mouse.start_x = e->x_root;
-                mouse.start_y = e->y_root;
-                mouse.orig_x = mw->x;
-                mouse.orig_y = mw->y;
-                XGrabPointer(dpy, root, True,
-                             ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                             GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+                grab_mouse(mw, 0, e);
                 return;
             }
         }
@@ -1065,16 +996,7 @@ handle_button_press(XButtonEvent *e)
         if (!mw->is_floating || mw->is_fullscreen) continue;
         if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
             && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-            mouse.active = 1;
-            mouse.resizing = 0;
-            mouse.win = mw;
-            mouse.start_x = e->x_root;
-            mouse.start_y = e->y_root;
-            mouse.orig_x = mw->x;
-            mouse.orig_y = mw->y;
-            XGrabPointer(dpy, root, True,
-                         ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                         GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+            grab_mouse(mw, 0, e);
             return;
         }
     }
@@ -1137,7 +1059,7 @@ done:
     mouse.win = NULL;
     XUngrabPointer(dpy, CurrentTime);
     if (ws == &spaces[SCRATCHPAD_IDX])
-        retile_scratchpad();
+        retile_ws(&spaces[SCRATCHPAD_IDX]);
     else
         retile_deferred();
     return;

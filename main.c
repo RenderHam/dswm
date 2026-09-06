@@ -4,6 +4,7 @@
 #include "dswm.h"
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
+#include <X11/XF86keysym.h>
 #include <X11/extensions/Xinerama.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,10 @@
 #include <err.h>
 
 #define NELEM(x)  (sizeof(x) / sizeof(x[0]))
+
+#define WS(n)                                                          \
+        { MODKEY,         XK_##n, SWITCH_WORKSPACE,  { .i = n-1 } },   \
+        { MODKEY|SHTKEY,  XK_##n, MOVE_TO_WORKSPACE, { .i = n-1 } }
 
 /* ---- globals (owned by this file) ---- */
 
@@ -198,11 +203,7 @@ grab_keys(void)
         KeyCode code = XKeysymToKeycode(dpy, keys[i].sym);
         if (!code) continue;
 
-        if (keys[i].mod == MODKEY) {
-            for (j = 0; j < NELEM(mod4_variants); j++)
-                XGrabKey(dpy, code, keys[i].mod | mod4_variants[j],
-                         root, True, GrabModeAsync, GrabModeAsync);
-        } else if (keys[i].mod == (MODKEY | SHTKEY)) {
+        if (keys[i].mod == MODKEY || keys[i].mod == (MODKEY | SHTKEY)) {
             for (j = 0; j < NELEM(mod4_variants); j++)
                 XGrabKey(dpy, code, keys[i].mod | mod4_variants[j],
                          root, True, GrabModeAsync, GrabModeAsync);
