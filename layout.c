@@ -24,6 +24,16 @@ curws(void)
     return &spaces[cur_ws];
 }
 
+/* Return the workspace that should receive user input:
+   if the scratchpad overlay is visible it takes priority. */
+Workspace *
+active_ws(void)
+{
+    if (scratch_visible)
+        return &spaces[SCRATCHPAD_IDX];
+    return &spaces[cur_ws];
+}
+
 Monitor *
 curmon(void)
 {
@@ -152,6 +162,73 @@ compute_usable_area(Monitor *mon, int *usable_w, int *usable_h,
     if (*usable_w < MIN_WIN_DIM) *usable_w = mon->width;
 }
 
+/* Public version for scratchpad: compute usable area and position each
+   tiled window in the given workspace.  Used by toggle_scratchpad
+   which operates outside the current-workspace context. */
+void
+compute_usable_area_ws(Monitor *mon, Workspace *ws)
+{
+    int usable_h, usable_w, x_start, y_start;
+    int i;
+
+    compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
+
+    if (mon->horizontal_mode) {
+        int win_h = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+        if (win_h < 1) win_h = 1;
+        int cur_x = x_start;
+        for (i = 0; i < ws->ntiled; i++) {
+            float f = ws->tiled[i]->width_factor;
+            if (f < MIN_WIDTH_FACTOR) f = MIN_WIDTH_FACTOR;
+            if (f > MAX_WIDTH_FACTOR) f = MAX_WIDTH_FACTOR;
+            int col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
+            if (col_w < MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH)
+                col_w = MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
+            if (col_w > usable_w) col_w = usable_w;
+            int win_w = col_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+            if (win_w < 1) win_w = 1;
+            ws->tiled[i]->x = cur_x + GAP_OUTER;
+            ws->tiled[i]->y = y_start + GAP_OUTER;
+            ws->tiled[i]->width = win_w;
+            ws->tiled[i]->height = win_h;
+            cur_x += col_w;
+        }
+    } else {
+        if (ws->ntiled == 1) {
+            ws->tiled[0]->x = x_start + GAP_OUTER;
+            ws->tiled[0]->y = y_start + GAP_OUTER;
+            ws->tiled[0]->width = usable_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+            ws->tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+            if (ws->tiled[0]->width < 1) ws->tiled[0]->width = 1;
+            if (ws->tiled[0]->height < 1) ws->tiled[0]->height = 1;
+        } else {
+            int master_w = (int)(usable_w * mon->master_factor)
+                           - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
+            int stack_x  = x_start + (int)(usable_w * mon->master_factor) + GAP_INNER;
+            int stack_w  = usable_w - (int)(usable_w * mon->master_factor)
+                           - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
+            int stack_h;
+            if (master_w < 1) master_w = 1;
+            if (stack_w < 1) stack_w = 1;
+            stack_h = (usable_h - GAP_OUTER * 2 - GAP_INNER * (ws->ntiled - 1))
+                      / (ws->ntiled - 1) - 2 * BORDER_WIDTH;
+            if (stack_h < 1) stack_h = 1;
+            ws->tiled[0]->x = x_start + GAP_OUTER;
+            ws->tiled[0]->y = y_start + GAP_OUTER;
+            ws->tiled[0]->width = master_w;
+            ws->tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
+            if (ws->tiled[0]->height < 1) ws->tiled[0]->height = 1;
+            for (i = 1; i < ws->ntiled; i++) {
+                ws->tiled[i]->x = stack_x;
+                ws->tiled[i]->y = y_start + GAP_OUTER
+                    + (i - 1) * (stack_h + GAP_INNER + 2 * BORDER_WIDTH);
+                ws->tiled[i]->width = stack_w;
+                ws->tiled[i]->height = stack_h;
+            }
+        }
+    }
+}
+
 /* ---- tiling: horizontal scroll layout (infinite canvas) ---- */
 /* Each tiled window is a column whose width is scaled by width_factor.
    A virtual camera (cam_x) scrolls the strip left/right so that the
@@ -166,9 +243,8 @@ compute_usable_w(Monitor *mon)
 }
 
 void
-update_camera(void)
+update_camera_ws(Workspace *ws)
 {
-    Workspace *ws = curws();
     Monitor *mon = curmon();
     int i;
     int usable_w, cam_x = 0, centered = 0;
@@ -230,9 +306,14 @@ update_camera(void)
 }
 
 void
-tile_horizontal(void)
+update_camera(void)
 {
-    Workspace *ws = curws();
+    update_camera_ws(curws());
+}
+
+void
+tile_horizontal_ws(Workspace *ws)
+{
     Monitor *mon = curmon();
     int i;
     int usable_h, usable_w, x_start, y_start;
@@ -305,7 +386,13 @@ tile_horizontal(void)
         ws->cam_x = cam_x;
     }
 
-    update_camera();
+    update_camera_ws(ws);
+}
+
+void
+tile_horizontal(void)
+{
+    tile_horizontal_ws(curws());
 }
 
 /* ---- tiling: master-stack layout ---- */
@@ -314,9 +401,8 @@ tile_horizontal(void)
    the remaining windows (stack) are stacked vertically on the right. */
 
 void
-tile_windows(void)
+tile_windows_ws(Workspace *ws)
 {
-    Workspace *ws = curws();
     Monitor *mon = curmon();
     int i;
     int usable_h, usable_w, x_start, y_start;
@@ -374,6 +460,12 @@ tile_windows(void)
     XFlush(dpy);
 }
 
+void
+tile_windows(void)
+{
+    tile_windows_ws(curws());
+}
+
 /* ---- resize ---- */
 
 void
@@ -398,37 +490,29 @@ resize_master(void *arg)
 void
 resize_window(void *arg)
 {
-    Workspace *ws = curws();
+    Workspace *ws = active_ws();
+    Monitor *mon = curmon();
     ManagedWindow *w = ws->focused;
     int dir = (int)(long)arg;
+
     if (!w) return;
+    if (w->is_floating || w->is_fullscreen) return;
 
     w->width_factor += dir * RESIZE_FACTOR_STEP;
     if (w->width_factor < MIN_WIDTH_FACTOR) w->width_factor = MIN_WIDTH_FACTOR;
     if (w->width_factor > MAX_WIDTH_FACTOR) w->width_factor = MAX_WIDTH_FACTOR;
     w->is_fit = 0;
 
-    if (w->is_floating || w->is_fullscreen) {
-        int new_w = (int)(w->width * (1.0f + dir * RESIZE_FACTOR_STEP));
-        int new_h = (int)(w->height * (1.0f + dir * RESIZE_FACTOR_STEP));
-        if (new_w < MIN_WIN_DIM) new_w = MIN_WIN_DIM;
-        if (new_h < MIN_WIN_DIM) new_h = MIN_WIN_DIM;
-        if (new_w > scrw - 2 * GAP_OUTER) new_w = scrw - 2 * GAP_OUTER;
-        if (new_h > scrh - 2 * GAP_OUTER) new_h = scrh - 2 * GAP_OUTER;
-        w->width = new_w;
-        w->height = new_h;
-        w->x = scrw / 2 - new_w / 2;
-        w->y = scrh / 2 - new_h / 2;
-        XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
-    } else {
-        tile_horizontal();
-    }
+    if (mon->horizontal_mode)
+        tile_horizontal_ws(ws);
+    else
+        tile_windows_ws(ws);
 }
 
 void
 fit_window(void)
 {
-    Workspace *ws = curws();
+    Workspace *ws = active_ws();
     ManagedWindow *w = ws->focused;
     if (!w) return;
 

@@ -22,8 +22,10 @@ int running;
 int cur_ws;
 Monitor mons[8];
 int nmons;
-Workspace spaces[NUM_WORKSPACES];
+Workspace spaces[NUM_WORKSPACES + 1];
 MouseState mouse;
+int scratch_visible;
+ManagedWindow *scratch_saved_focus;
 
 /* cached atoms */
 Atom atom_wm_delete;
@@ -91,10 +93,12 @@ Key keys[] = {
     { MODKEY,           XK_f,      TOGGLE_FULLSCREEN, { 0 } },
     { MODKEY,           XK_m,      FIT_WINDOW,     { 0 } },
     { MODKEY,           XK_c,      TOGGLE_CENTER_FOCUS, { 0 } },
-    { MODKEY|SHTKEY,    XK_space,  TOGGLE_FLOAT,   { 0 } },
+    { MODKEY,           XK_s,      TOGGLE_FLOAT,   { 0 } },
     { MODKEY,           XK_comma,  FOCUS_MONITOR,  { .i = 0 } },
     { MODKEY,           XK_period, FOCUS_MONITOR,  { .i = 1 } },
     { MODKEY,           XK_slash,  FOCUS_MONITOR,  { .i = 2 } },
+    { MODKEY,           XK_grave,  TOGGLE_SCRATCHPAD, { 0 } },
+    { MODKEY|SHTKEY,    XK_grave,  MOVE_TO_SCRATCHPAD, { 0 } },
     WS(1), WS(2), WS(3), WS(4), WS(5), WS(6), WS(7), WS(8), WS(9),
     { 0, XF86XK_AudioRaiseVolume,  SPAWN, { .v = vol_up      } },
     { 0, XF86XK_AudioLowerVolume,  SPAWN, { .v = vol_down    } },
@@ -209,8 +213,15 @@ grab_keys(void)
         }
     }
 
-    XGrabButton(dpy, Button1, MODKEY, root, True,
-                ButtonPressMask, GrabModeAsync, GrabModeAsync, None, None);
+    {
+        unsigned int mv[] = {0, LockMask, Mod2Mask, LockMask | Mod2Mask};
+        for (size_t k = 0; k < NELEM(mv); k++) {
+            XGrabButton(dpy, Button1, MODKEY | mv[k], root, True,
+                        ButtonPressMask, GrabModeAsync, GrabModeAsync, None, None);
+            XGrabButton(dpy, Button3, MODKEY | mv[k], root, True,
+                        ButtonPressMask, GrabModeAsync, GrabModeAsync, None, None);
+        }
+    }
 }
 
 /* ---- monitors ---- */
@@ -236,6 +247,8 @@ monitors_init(void)
                 mons[i].master_factor = 0.5f;
                 mons[i].horizontal_mode = 1;
                 mons[i].strut_valid = 0;
+                mons[i].dim_win = 0;
+                mons[i].dim_colormap = 0;
             }
             XFree(info);
         }
@@ -253,6 +266,8 @@ monitors_init(void)
         mons[0].master_factor = 0.5f;
         mons[0].horizontal_mode = 1;
         mons[0].strut_valid = 0;
+        mons[0].dim_win = 0;
+        mons[0].dim_colormap = 0;
     }
 }
 
@@ -281,7 +296,7 @@ init(void)
     monitors_init();
     setup_ewmh();
 
-    for (i = 0; i < NUM_WORKSPACES; i++) {
+    for (i = 0; i < NUM_WORKSPACES + 1; i++) {
         ws = &spaces[i];
         ws->wins = NULL;
         ws->nwin = 0;
@@ -299,6 +314,9 @@ init(void)
                            | PointerMotionMask | PropertyChangeMask);
 
     signal(SIGCHLD, SIG_IGN);
+
+    scratch_visible = 0;
+    scratch_saved_focus = NULL;
 
     /* map existing windows */
     {
@@ -323,11 +341,22 @@ static void
 cleanup(void)
 {
     int i;
-    for (i = 0; i < NUM_WORKSPACES; i++) {
+    for (i = 0; i < NUM_WORKSPACES + 1; i++) {
         free(spaces[i].wins);
         free(spaces[i].tiled);
         spaces[i].wins = NULL;
         spaces[i].tiled = NULL;
+    }
+    /* Destroy any lingering dim overlay */
+    for (i = 0; i < nmons; i++) {
+        if (mons[i].dim_win) {
+            XDestroyWindow(dpy, mons[i].dim_win);
+            mons[i].dim_win = 0;
+        }
+        if (mons[i].dim_colormap) {
+            XFreeColormap(dpy, mons[i].dim_colormap);
+            mons[i].dim_colormap = 0;
+        }
     }
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
     XSetInputFocus(dpy, PointerRoot, RevertToPointerRoot, CurrentTime);

@@ -14,10 +14,12 @@
 #define PATCH_VERSION 0
 
 #define NUM_WORKSPACES     9
+#define SCRATCHPAD_IDX     9  /* hidden 10th slot, not in EWMH */
 
 #define BORDER_WIDTH       3
 #define BORDER_COLOR       0x181818
 #define FOCUS_COLOR        0x005577
+#define DIM_COLOR          0x000000CC  /* RRGGBBAA — alpha baked into pixel */
 
 #define GAP_OUTER          10
 #define GAP_INNER          10
@@ -37,6 +39,7 @@
 
 #define INITIAL_CAP        16
 #define MIN_WIN_DIM        10
+#define FLOAT_STEP         20
 #define MIN_MASTER_VERT    0.1f
 #define MAX_MASTER_VERT    0.9f
 
@@ -63,15 +66,21 @@ struct ManagedWindow {
     float saved_factor;
     int pre_fs_x, pre_fs_y;
     int pre_fs_width, pre_fs_height;
+    int pre_float_x, pre_float_y;
+    int pre_float_w, pre_float_h;
+    int pre_float_idx;
+    int pre_float_cam_x;
 };
 
 /* ---- mouse drag state ---- */
 
 typedef struct {
     int active;           /* 0=idle, 1=dragging */
-    ManagedWindow *win;   /* window being dragged */
+    int resizing;         /* 1=resizing floating window */
+    ManagedWindow *win;   /* window being dragged/resized */
     int start_x, start_y; /* cursor position at grab */
     int orig_x, orig_y;   /* original window position */
+    int orig_w, orig_h;   /* original window size (for resize) */
 } MouseState;
 
 typedef struct Monitor Monitor;
@@ -84,6 +93,8 @@ struct Monitor {
     int horizontal_mode;
     int strut_top, strut_bottom, strut_left, strut_right;
     int strut_valid;
+    Window dim_win;  /* fullscreen dim overlay for scratchpad */
+    Colormap dim_colormap;
 };
 
 typedef struct Workspace Workspace;
@@ -118,6 +129,7 @@ enum {
     RESIZE_MASTER, RESIZE_WINDOW,
     SCROLL_LEFT, SCROLL_RIGHT,
     TOGGLE_LAYOUT, TOGGLE_FULLSCREEN, TOGGLE_FLOAT, FIT_WINDOW, TOGGLE_CENTER_FOCUS,
+    TOGGLE_SCRATCHPAD, MOVE_TO_SCRATCHPAD,
     FOCUS_MONITOR,
     SWITCH_WORKSPACE, MOVE_TO_WORKSPACE,
 };
@@ -160,8 +172,10 @@ extern int running;
 extern int cur_ws;
 extern Monitor mons[8];
 extern int nmons;
-extern Workspace spaces[NUM_WORKSPACES];
+extern Workspace spaces[NUM_WORKSPACES + 1];
 extern MouseState mouse;
+extern int scratch_visible;
+extern ManagedWindow *scratch_saved_focus;
 
 /* cached atoms (owned by main.c) */
 extern Atom atom_wm_delete;
@@ -188,6 +202,7 @@ extern int center_focused;
 /* ---- layout.c prototypes ---- */
 
 Workspace *curws(void);
+Workspace *active_ws(void);
 Monitor   *curmon(void);
 
 int  tiled_ensure_cap(Workspace *ws);
@@ -196,8 +211,12 @@ void tiled_remove(Workspace *ws, Window w);
 void rebuild_tiled(Workspace *ws);
 
 void update_camera(void);
+void update_camera_ws(Workspace *ws);
 void tile_horizontal(void);
+void tile_horizontal_ws(Workspace *ws);
 void tile_windows(void);
+void tile_windows_ws(Workspace *ws);
+void compute_usable_area_ws(Monitor *mon, Workspace *ws);
 void retile(void);
 void retile_deferred(void);
 void flush_retile(void);
@@ -224,6 +243,8 @@ void close_window(void);
 void quit_wm(void);
 void toggle_fullscreen(void);
 void toggle_float(void);
+void toggle_scratchpad(void);
+void move_to_scratchpad(void);
 void resize_master(void *arg);
 void resize_window(void *arg);
 void fit_window(void);
