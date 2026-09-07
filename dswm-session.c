@@ -31,7 +31,9 @@ int main(void)
     struct stat st;
     if (stat(path, &st) == 0 && (st.st_mode & S_IXUSR)) {
         pid_t pid = fork();
-        if (pid == 0) {
+        if (pid == -1) {
+            fprintf(stderr, "dswm-session: fork failed\n");
+        } else if (pid == 0) {
             setsid();
             char *cmd[] = { "/bin/sh", path, NULL };
             execvp(cmd[0], cmd);

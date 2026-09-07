@@ -39,6 +39,14 @@
 #define MAX_MASTER_VERT    0.9f
 #define DWINDLE_SPLIT_RATIO    0.5f
 #define DWINDLE_MIN_NODE       32
+#define DWINDLE_RATIO_MIN  0.1f
+#define DWINDLE_RATIO_MAX  0.9f
+#define DWINDLE_SPLIT_STEP 100.0f
+
+#define MAX_TREE_STACK     64
+#define MAX_LEAVES         128
+#define MAX_MONS           8
+#define RESIZE_HANDLE_PX   16
 
 #define MODKEY             Mod4Mask
 #define SHTKEY             ShiftMask
@@ -57,6 +65,9 @@ struct ManagedWindow {
     int is_fullscreen  : 1;
     int is_fit         : 1;
     int pre_fs_floating : 1;
+    int is_above       : 1;  /* _NET_WM_STATE_ABOVE — always raised */
+    int is_sticky      : 1;  /* _NET_WM_STATE_STICKY — visible all workspaces */
+    int is_not_focusable : 1; /* _NET_WM_STATE_NOT_FOCUSABLE */
     int workspace      : 4;
     int monitor        : 3;
     /* cold fields: only on fullscreen toggle / save-restore */
@@ -189,7 +200,7 @@ extern Window root;
 extern int scrw, scrh;
 extern int running;
 extern int cur_ws;
-extern Monitor mons[8];
+extern Monitor mons[MAX_MONS];
 extern int nmons;
 extern Workspace spaces[NUM_WORKSPACES + 1];
 extern MouseState mouse;
@@ -211,6 +222,16 @@ extern Atom atom_net_wm_window_type;
 extern Atom atom_net_wm_type_desktop;
 extern Atom atom_net_wm_type_dock;
 extern Atom atom_net_wm_type_splash;
+extern Atom atom_net_wm_type_normal;
+extern Atom atom_net_wm_type_dialog;
+extern Atom atom_net_wm_type_util;
+extern Atom atom_net_wm_type_toolbar;
+extern Atom atom_net_wm_type_notification;
+extern Atom atom_net_wm_type_popup_menu;
+extern Atom atom_net_wm_type_menu;
+extern Atom atom_net_wm_state_above;
+extern Atom atom_net_wm_state_sticky;
+extern Atom atom_net_wm_state_not_focusable;
 extern Atom atom_motif_wm_hints;
 
 /* ---- globals (owned by layout.c) ---- */
@@ -246,7 +267,6 @@ void     dwindle_insert(Workspace *ws, Window w);
 void     dwindle_remove(Workspace *ws, Window w);
 void     dwindle_arrange(Workspace *ws, Monitor *mon);
 void     dwindle_cleanup(Workspace *ws);
-void     dwindle_focus_leaf(Workspace *ws, int dir);
 void     dwindle_focus_prevnext(Workspace *ws, int delta);
 void     dwindle_resize(Workspace *ws, int dir, int delta);
 ManagedWindow *dwindle_focused_mw(Workspace *ws);
@@ -274,7 +294,7 @@ void toggle_scratchpad(void);
 void move_to_scratchpad(void);
 void resize_master(void *arg);
 void resize_window(void *arg);
-void fit_window(void);
+int fit_window(void);
 void spawn(void *arg);
 
 /* event handlers */
@@ -287,6 +307,7 @@ void handle_key_press(XKeyEvent *e);
 void handle_button_press(XButtonEvent *e);
 void handle_button_release(XButtonEvent *e);
 void handle_motion_notify(XMotionEvent *e);
+void handle_property_notify(XPropertyEvent *e);
 
 /* ---- main.c prototypes ---- */
 

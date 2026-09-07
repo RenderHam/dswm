@@ -29,6 +29,49 @@ wins_ensure_cap(Workspace *ws)
     return 1;
 }
 
+/* Find the index of ws->focused in ws->wins[].  Returns -1 if not found. */
+static int
+find_focused_idx(Workspace *ws)
+{
+    int i;
+    if (!ws->focused) return -1;
+    for (i = 0; i < ws->nwin; i++)
+        if (&ws->wins[i] == ws->focused)
+            return i;
+    return -1;
+}
+
+/* Refocus the workspace after a window at 'removed' index was memmoved out.
+   Handles both cases: focused window was removed, or a different window. */
+static void
+refocus_after_remove(Workspace *ws, int removed)
+{
+    if (ws->nwin == 0) {
+        ws->focused = NULL;
+        return;
+    }
+
+    int fi = find_focused_idx(ws);
+    int ni;
+
+    if (fi == -1) {
+        /* Focused pointer was invalidated by memmove — find the window
+           that shifted into the removed slot, or fall back to the end. */
+        ni = removed;
+        if (ni >= ws->nwin) ni = ws->nwin - 1;
+    } else if (fi > removed) {
+        /* Focused window shifted left by one due to memmove */
+        ni = fi - 1;
+    } else {
+        /* Focused window was not affected by the removal */
+        ni = fi;
+    }
+
+    ws->focused = &ws->wins[ni];
+    update_border(ws->focused->window, 1);
+    XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
+}
+
 /* ---- focus ---- */
 
 void
@@ -44,6 +87,11 @@ refocus(Workspace *ws, ManagedWindow *next)
 
     ws->focused = next;
     if (next) {
+        /* _NET_WM_STATE_NOT_FOCUSABLE windows don't receive focus */
+        if (next->is_not_focusable) {
+            update_border(next->window, 0);
+            return;
+        }
         update_border(next->window, 1);
         XSetInputFocus(dpy, next->window, RevertToPointerRoot, CurrentTime);
         XRaiseWindow(dpy, next->window);
@@ -146,6 +194,10 @@ show_workspace(int idx, int visible)
     int i;
 
     for (i = 0; i < ws->nwin; i++) {
+        /* Sticky windows are never unmapped — they stay visible on all
+           workspaces.  When showing a workspace, always map them. */
+        if (!visible && ws->wins[i].is_sticky)
+            continue;
         if (visible)
             XMapWindow(dpy, ws->wins[i].window);
         else
@@ -227,44 +279,31 @@ move_to_workspace(void *arg)
     if (!curmon()->horizontal_mode)
         dwindle_insert(target, win.window);
 
-    XUnmapWindow(dpy, win.window);
+    /* Sticky windows stay mapped on all workspaces */
+    if (!win.is_sticky)
+        XUnmapWindow(dpy, win.window);
 
-    if (ws->nwin == 0) {
-        ws->focused = NULL;
-    } else {
-        int ni = removed - 1;
-        if (ni < 0) ni = 0;
-        if (ni >= ws->nwin) ni = ws->nwin - 1;
-        ws->focused = &ws->wins[ni];
-        update_border(ws->focused->window, 1);
-        XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
-    }
+    refocus_after_remove(ws, removed);
     retile_ws(curws());
 }
 
 /* ---- window management ---- */
 
-/* Manage a new top-level window: query attributes, skip override-redirect
-   and special window types (desktop/dock/splash), allocate a ManagedWindow
-   in the current workspace, apply class-matching rules, subscribe to
-   events, set border, check struts, map, and tile. */
-void
-manage_window(Window w)
+/* Window type classification results. */
+#define WIN_SKIP     0  /* map only, don't manage (desktop/dock/splash/etc.) */
+#define WIN_NORMAL   1  /* manage + tile */
+#define WIN_DIALOG   2  /* manage + auto-float at requested position */
+
+/* Classify a window by its _NET_WM_WINDOW_TYPE property.
+   Returns WIN_SKIP, WIN_NORMAL, or WIN_DIALOG. */
+static int
+classify_window_type(Window w)
 {
-    Workspace *ws = scratch_visible ? &spaces[SCRATCHPAD_IDX] : curws();
-    XWindowAttributes wa;
-    XClassHint ch = { NULL, NULL };
-    ManagedWindow mw;
-    int i;
-
-    if (!XGetWindowAttributes(dpy, w, &wa)) return;
-    if (wa.override_redirect) return;
-
-    /* skip desktop, dock, splash */
     Atom actual;
     int fmt;
     unsigned long n, remain;
     unsigned char *data = NULL;
+
     if (XGetWindowProperty(dpy, w, atom_net_wm_window_type, 0, 1, False,
                            XA_ATOM, &actual, &fmt, &n, &remain,
                            &data) == Success) {
@@ -273,13 +312,129 @@ manage_window(Window w)
             XFree(data);
             if (type == atom_net_wm_type_desktop ||
                 type == atom_net_wm_type_dock ||
-                type == atom_net_wm_type_splash) {
-                XMapWindow(dpy, w);
-                return;
+                type == atom_net_wm_type_splash ||
+                type == atom_net_wm_type_notification ||
+                type == atom_net_wm_type_popup_menu ||
+                type == atom_net_wm_type_menu) {
+                return WIN_SKIP;
             }
+            if (type == atom_net_wm_type_dialog ||
+                type == atom_net_wm_type_util ||
+                type == atom_net_wm_type_toolbar) {
+                return WIN_DIALOG;
+            }
+            /* NORMAL and anything else → treat as normal */
+            return WIN_NORMAL;
         } else if (data) {
             XFree(data);
         }
+    }
+    /* No type set → treat as normal */
+    return WIN_NORMAL;
+}
+
+/* Read _NET_WM_STATE and set the corresponding ManagedWindow flags.
+   Also sets is_floating=1 for above/sticky windows. */
+static void
+read_net_wm_state(ManagedWindow *mw, Window w)
+{
+    Atom actual;
+    int fmt;
+    unsigned long n, remain;
+    unsigned char *data = NULL;
+    unsigned long i;
+
+    if (XGetWindowProperty(dpy, w, atom_net_wm_state, 0, 32, False,
+                           XA_ATOM, &actual, &fmt, &n, &remain,
+                           &data) != Success || !data)
+        return;
+
+    if (actual != XA_ATOM || fmt != 32) {
+        XFree(data);
+        return;
+    }
+
+    Atom *states = (Atom *)data;
+    for (i = 0; i < n; i++) {
+        if (states[i] == atom_net_wm_state_above) {
+            mw->is_above = 1;
+            mw->is_floating = 1;
+        } else if (states[i] == atom_net_wm_state_sticky) {
+            mw->is_sticky = 1;
+            mw->is_floating = 1;
+        } else if (states[i] == atom_net_wm_state_not_focusable) {
+            mw->is_not_focusable = 1;
+        }
+    }
+    XFree(data);
+}
+
+/* Apply window-class rules to determine initial floating state. */
+static void
+apply_rules(ManagedWindow *mw, Window w)
+{
+    XClassHint ch = { NULL, NULL };
+    int i;
+
+    if (XGetClassHint(dpy, w, &ch)) {
+        for (i = 0; i < (int)num_rules; i++) {
+            if (ch.res_class && strcmp(ch.res_class, rules[i].wm_class) == 0) {
+                mw->is_floating = rules[i].is_floating;
+                break;
+            }
+        }
+        if (ch.res_class) XFree(ch.res_class);
+        if (ch.res_name) XFree(ch.res_name);
+    }
+}
+
+/* Insert a new ManagedWindow into the workspace's wins[] array.
+   Places it after the currently focused window so it appears next
+   in tiled order.  Falls back to appending if no focused window. */
+static int
+insert_into_workspace(Workspace *ws, ManagedWindow mw)
+{
+    int insert_idx = ws->nwin;
+    int i;
+
+    if (ws->focused) {
+        for (i = 0; i < ws->nwin; i++) {
+            if (&ws->wins[i] == ws->focused) {
+                insert_idx = i + 1;
+                break;
+            }
+        }
+    }
+    if (!wins_ensure_cap(ws)) return -1;
+    if (insert_idx < ws->nwin)
+        memmove(&ws->wins[insert_idx + 1], &ws->wins[insert_idx],
+                (ws->nwin - insert_idx) * sizeof(ManagedWindow));
+    ws->wins[insert_idx] = mw;
+    ws->nwin++;
+    return insert_idx;
+}
+
+/* Manage a new top-level window: classify by type, read EWMH state,
+   allocate a ManagedWindow, apply rules, subscribe to events, set border,
+   check struts, map, and tile.  Only _NET_WM_WINDOW_TYPE_NORMAL windows
+   are tiled; DIALOG/UTIL/TOOLBAR are auto-floated; all other types are
+   mapped but not managed. */
+void
+manage_window(Window w)
+{
+    Workspace *ws = scratch_visible ? &spaces[SCRATCHPAD_IDX] : curws();
+    XWindowAttributes wa;
+    ManagedWindow mw;
+    int insert_idx;
+    int win_type;
+
+    if (!XGetWindowAttributes(dpy, w, &wa)) return;
+    if (wa.override_redirect) return;
+
+    win_type = classify_window_type(w);
+    if (win_type == WIN_SKIP) {
+        XMapWindow(dpy, w);
+        return;
     }
 
     memset(&mw, 0, sizeof(mw));
@@ -293,40 +448,20 @@ manage_window(Window w)
     mw.width_factor = 1.0f;
     mw.saved_factor = 1.0f;
 
-    if (XGetClassHint(dpy, w, &ch)) {
-        for (i = 0; i < (int)num_rules; i++) {
-            if (ch.res_class && strcmp(ch.res_class, rules[i].wm_class) == 0) {
-                mw.is_floating = rules[i].is_floating;
-                break;
-            }
-        }
-        if (ch.res_class) XFree(ch.res_class);
-        if (ch.res_name) XFree(ch.res_name);
-    }
+    /* Auto-float dialogs/utils/toolbars at their requested position */
+    if (win_type == WIN_DIALOG)
+        mw.is_floating = 1;
 
-    if (!wins_ensure_cap(ws)) err(1, "wins_ensure_cap");
+    apply_rules(&mw, w);
+    read_net_wm_state(&mw, w);
 
-    /* Insert after focused window so it appears next in tiled order.
-       Falls back to appending if no focused window. */
-    int insert_idx = ws->nwin;
-    if (ws->focused) {
-        for (i = 0; i < ws->nwin; i++) {
-            if (&ws->wins[i] == ws->focused) {
-                insert_idx = i + 1;
-                break;
-            }
-        }
-    }
-    if (insert_idx < ws->nwin)
-        memmove(&ws->wins[insert_idx + 1], &ws->wins[insert_idx],
-                (ws->nwin - insert_idx) * sizeof(ManagedWindow));
-    ws->wins[insert_idx] = mw;
-    ws->nwin++;
+    insert_idx = insert_into_workspace(ws, mw);
+    if (insert_idx == -1) err(1, "wins_ensure_cap");
 
     rebuild_tiled(ws);
 
-    /* In dwindle mode, insert window into dwindle tree */
-    {
+    /* In dwindle mode, insert tiled windows into dwindle tree */
+    if (!mw.is_floating && !mw.is_fullscreen) {
         Monitor *mon = curmon();
         if (!mon->horizontal_mode)
             dwindle_insert(ws, w);
@@ -370,12 +505,7 @@ unmanage_window(Window w, int force)
 
     for (j = lo; j < hi; j++) {
         Workspace *ws = &spaces[j];
-        int removed = -1, focused_idx = -1;
-
-        for (i = 0; i < ws->nwin; i++) {
-            if (ws->focused && &ws->wins[i] == ws->focused)
-                focused_idx = i;
-        }
+        int removed = -1;
 
         for (i = 0; i < ws->nwin; i++) {
             if (ws->wins[i].window == w) {
@@ -396,24 +526,8 @@ unmanage_window(Window w, int force)
 
         rebuild_tiled(ws);
 
-        if (j == cur_ws) {
-            if (ws->nwin == 0) {
-                ws->focused = NULL;
-            } else if (focused_idx == removed) {
-                int ni = removed - 1;
-                if (ni < 0) ni = 0;
-                if (ni >= ws->nwin) ni = ws->nwin - 1;
-                ws->focused = &ws->wins[ni];
-                update_border(ws->focused->window, 1);
-                XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
-            } else if (focused_idx > removed) {
-                ws->focused = &ws->wins[focused_idx - 1];
-            } else if (focused_idx >= 0) {
-                ws->focused = &ws->wins[focused_idx];
-            } else {
-                ws->focused = NULL;
-            }
-        }
+        if (j == cur_ws)
+            refocus_after_remove(ws, removed);
     }
 
     retile_deferred();
@@ -447,7 +561,13 @@ focus_cycle(int delta)
     }
     if (idx == -1) return;
 
+    /* Walk in the given direction, skipping not-focusable windows */
     int new_idx = idx + delta;
+    while (new_idx >= 0 && new_idx < ws->ntiled) {
+        if (!ws->tiled[new_idx]->is_not_focusable)
+            break;
+        new_idx += delta;
+    }
     if (new_idx < 0 || new_idx >= ws->ntiled) return;
 
     refocus(ws, ws->tiled[new_idx]);
@@ -530,8 +650,16 @@ toggle_fullscreen(void)
         XSetWindowBorderWidth(dpy, w->window, BORDER_WIDTH);
         XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
 
-        XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
-                        PropModeReplace, (unsigned char *)0, 0);
+        /* Rebuild _NET_WM_STATE, preserving above/sticky/not_focusable */
+        {
+            Atom states[4];
+            int nstates = 0;
+            if (w->is_above)    states[nstates++] = atom_net_wm_state_above;
+            if (w->is_sticky)   states[nstates++] = atom_net_wm_state_sticky;
+            if (w->is_not_focusable) states[nstates++] = atom_net_wm_state_not_focusable;
+            XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
+                            PropModeReplace, (unsigned char *)states, nstates);
+        }
 
         retile_deferred();
     }
@@ -547,6 +675,7 @@ toggle_float(void)
 
     if (!w) return;
     if (w->is_fullscreen) return;
+    if (w->is_above || w->is_sticky) return;  /* always floating */
 
     if (!w->is_floating) {
         /* Save tiled geometry and position for snap-back */
@@ -597,8 +726,6 @@ toggle_float(void)
            scrolling and stacking layouts. */
         if (ws == &spaces[SCRATCHPAD_IDX]) {
             retile_ws(&spaces[SCRATCHPAD_IDX]);
-        } else if (mon->horizontal_mode) {
-            tile_horizontal_ws(ws);
         } else {
             retile_deferred();
         }
@@ -675,6 +802,52 @@ scratch_unmap_all(void)
         XUnmapWindow(dpy, ws->wins[i].window);
 }
 
+/* Create the dim overlay window for the scratchpad. */
+static void
+scratchpad_create_dim(Monitor *mon)
+{
+    Visual *vis;
+    int depth;
+    Colormap cm;
+    int has_argb = find_argb_visual(dpy, &vis, &depth, &cm);
+    unsigned char r, g, b, a;
+    XSetWindowAttributes swa;
+
+    parse_dim_color(DIM_COLOR, &r, &g, &b, &a);
+
+    swa.override_redirect = True;
+    swa.colormap = has_argb ? cm : CopyFromParent;
+    if (has_argb)
+        swa.background_pixel = (a << 24) | (r << 16) | (g << 8) | b;
+    else
+        swa.background_pixel = (r << 16) | (g << 8) | b;
+    swa.border_pixel = 0;
+
+    mon->dim_win = XCreateWindow(dpy, root,
+        mon->x, mon->y, mon->width, mon->height, 0,
+        depth, InputOutput, vis,
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel
+            | (has_argb ? CWColormap : 0),
+        &swa);
+    XMapWindow(dpy, mon->dim_win);
+    XRaiseWindow(dpy, mon->dim_win);
+    mon->dim_colormap = has_argb ? cm : 0;
+}
+
+/* Destroy the dim overlay window for the scratchpad. */
+static void
+scratchpad_destroy_dim(Monitor *mon)
+{
+    if (mon->dim_win) {
+        XDestroyWindow(dpy, mon->dim_win);
+        mon->dim_win = 0;
+    }
+    if (mon->dim_colormap) {
+        XFreeColormap(dpy, mon->dim_colormap);
+        mon->dim_colormap = 0;
+    }
+}
+
 /* Move the focused window into the scratchpad workspace.
    Preserves tiling state; if scratchpad is visible the window appears
    immediately, otherwise it is hidden until the next toggle. */
@@ -725,121 +898,78 @@ move_to_scratchpad(void)
         XRaiseWindow(dpy, nw->window);
         retile_ws(&spaces[SCRATCHPAD_IDX]);
     } else {
-        /* Hidden until next toggle */
-        XUnmapWindow(dpy, win.window);
+        /* Hidden until next toggle — but sticky windows stay mapped */
+        if (!win.is_sticky)
+            XUnmapWindow(dpy, win.window);
     }
 
     /* Refocus source workspace */
-    if (src->nwin == 0) {
-        src->focused = NULL;
-    } else {
-        int ni = removed - 1;
-        if (ni < 0) ni = 0;
-        if (ni >= src->nwin) ni = src->nwin - 1;
-        src->focused = &src->wins[ni];
-        update_border(src->focused->window, 1);
-        XSetInputFocus(dpy, src->focused->window, RevertToPointerRoot, CurrentTime);
-    }
+    refocus_after_remove(src, removed);
     retile_deferred();
 }
 
-/* Toggle the scratchpad overlay on/off.  When showing, all scratchpad
-   windows are mapped and raised above the dimmed underlying workspace;
-   when hiding they are all unmapped and focus returns to where we were. */
-void
-toggle_scratchpad(void)
+/* Show the scratchpad overlay: create dim, map windows, refocus. */
+static void
+scratchpad_show(void)
 {
     Workspace *ws = &spaces[SCRATCHPAD_IDX];
     Workspace *under = &spaces[cur_ws];
     Monitor *mon = curmon();
+
+    scratch_saved_focus = under->focused;
+    scratch_visible = 1;
+
+    scratchpad_create_dim(mon);
+    retile_ws(&spaces[SCRATCHPAD_IDX]);
+    scratch_raise_all();
+
+    if (ws->focused) {
+        refocus(ws, ws->focused);
+    } else if (ws->nwin > 0) {
+        ws->focused = &ws->wins[0];
+        refocus(ws, ws->focused);
+    }
+}
+
+/* Hide the scratchpad overlay: unmap windows, destroy dim, restore focus. */
+static void
+scratchpad_hide(void)
+{
+    Workspace *under = &spaces[cur_ws];
+    Monitor *mon = curmon();
     int i;
 
-    if (!scratch_visible) {
-        /* Show scratchpad overlay */
-        scratch_saved_focus = under->focused;
-        scratch_visible = 1;
+    scratch_unmap_all();
+    scratch_visible = 0;
 
-        /* Create dim overlay: ARGB fullscreen window behind scratchpad */
-        {
-            Visual *vis;
-            int depth;
-            Colormap cm;
-            int has_argb = find_argb_visual(dpy, &vis, &depth, &cm);
-            unsigned char r, g, b, a;
-            XSetWindowAttributes swa;
+    scratchpad_destroy_dim(mon);
 
-            parse_dim_color(DIM_COLOR, &r, &g, &b, &a);
-
-            swa.override_redirect = True;
-            swa.colormap = has_argb ? cm : CopyFromParent;
-            /* Pack pixel as 0xAARRGGBB for depth-32, or plain RGB */
-            if (has_argb)
-                swa.background_pixel = (a << 24) | (r << 16) | (g << 8) | b;
-            else
-                swa.background_pixel = (r << 16) | (g << 8) | b;
-            swa.border_pixel = 0;
-
-            mon->dim_win = XCreateWindow(dpy, root,
-                mon->x, mon->y, mon->width, mon->height, 0,
-                depth, InputOutput, vis,
-                CWOverrideRedirect | CWBackPixel | CWBorderPixel
-                    | (has_argb ? CWColormap : 0),
-                &swa);
-            XMapWindow(dpy, mon->dim_win);
-            /* Dim goes above workspace, below scratchpad windows */
-            XRaiseWindow(dpy, mon->dim_win);
-            /* Free colormap on cleanup (stored in dim_win is enough) */
-            if (has_argb)
-                mon->dim_colormap = cm;
-            else
-                mon->dim_colormap = 0;
-        }
-
-        retile_ws(&spaces[SCRATCHPAD_IDX]);
-        scratch_raise_all();
-
-        /* Focus the last-focused scratchpad window, or first */
-        if (ws->focused) {
-            refocus(ws, ws->focused);
-        } else if (ws->nwin > 0) {
-            ws->focused = &ws->wins[0];
-            refocus(ws, ws->focused);
-        }
-    } else {
-        /* Hide scratchpad overlay */
-        scratch_unmap_all();
-        scratch_visible = 0;
-
-        /* Destroy dim overlay */
-        if (mon->dim_win) {
-            XDestroyWindow(dpy, mon->dim_win);
-            mon->dim_win = 0;
-        }
-        if (mon->dim_colormap) {
-            XFreeColormap(dpy, mon->dim_colormap);
-            mon->dim_colormap = 0;
-        }
-
-        /* Restore focus to the underlying workspace */
-        if (scratch_saved_focus) {
-            /* Validate pointer is still in wins[] */
-            int valid = 0;
-            for (i = 0; i < under->nwin; i++) {
-                if (&under->wins[i] == scratch_saved_focus) {
-                    valid = 1;
-                    break;
-                }
+    /* Restore focus to the underlying workspace */
+    if (scratch_saved_focus) {
+        int valid = 0;
+        for (i = 0; i < under->nwin; i++) {
+            if (&under->wins[i] == scratch_saved_focus) {
+                valid = 1;
+                break;
             }
-            if (valid)
-                refocus(under, scratch_saved_focus);
-            else if (under->nwin > 0)
-                refocus(under, &under->wins[0]);
-            else
-                under->focused = NULL;
-        } else if (under->nwin > 0) {
-            refocus(under, &under->wins[0]);
         }
+        if (valid)
+            refocus(under, scratch_saved_focus);
+        else if (under->nwin > 0)
+            refocus(under, &under->wins[0]);
+        else
+            under->focused = NULL;
+    } else if (under->nwin > 0) {
+        refocus(under, &under->wins[0]);
     }
+}
+void
+toggle_scratchpad(void)
+{
+    if (!scratch_visible)
+        scratchpad_show();
+    else
+        scratchpad_hide();
 }
 
 /* ---- spawn ---- */
@@ -848,7 +978,12 @@ void
 spawn(void *arg)
 {
     const char **cmd = (const char **)arg;
-    if (fork() == 0) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("dswm: fork");
+        return;
+    }
+    if (pid == 0) {
         close(ConnectionNumber(dpy));
         setsid();
         execvp(cmd[0], (char *const *)cmd);
@@ -857,341 +992,3 @@ spawn(void *arg)
     }
 }
 
-/* ---- event handlers ---- */
-
-/* MapRequest: a new window wants to be shown — manage it. */
-void
-handle_map_request(XMapRequestEvent *e)
-{
-    manage_window(e->window);
-}
-
-/* DestroyNotify: window was destroyed — remove from all workspaces. */
-void
-handle_destroy_notify(XDestroyWindowEvent *e)
-{
-    unmanage_window(e->window, 1);
-}
-
-/* UnmapNotify: window was unmapped — remove from current workspace. */
-void
-handle_unmap_notify(XUnmapEvent *e)
-{
-    unmanage_window(e->window, 0);
-}
-
-/* ConfigureRequest: honour stacking/resize requests from managed windows.
-   Tiled windows only get stacking updates; floating/fullscreen windows
-   are allowed full geometry changes. */
-void
-handle_configure_request(XConfigureRequestEvent *e)
-{
-    Workspace *ws = active_ws();
-    ManagedWindow *mw = NULL;
-    int i;
-
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].window == e->window) {
-            mw = &ws->wins[i];
-            break;
-        }
-    }
-
-    if (mw && !mw->is_floating && !mw->is_fullscreen) {
-        XWindowChanges wc;
-        wc.sibling = e->above;
-        wc.stack_mode = e->detail;
-        XConfigureWindow(dpy, e->window, CWSibling | CWStackMode, &wc);
-        return;
-    }
-
-    XWindowChanges wc;
-    wc.x = e->x;
-    wc.y = e->y;
-    wc.width = e->width;
-    wc.height = e->height;
-    wc.border_width = e->border_width;
-    wc.sibling = e->above;
-    wc.stack_mode = e->detail;
-    XConfigureWindow(dpy, e->window, e->value_mask, &wc);
-}
-
-/* EnterNotify: pointer entered a managed window — refocus it. */
-void
-handle_enter_notify(XCrossingEvent *e)
-{
-    Workspace *ws = active_ws();
-    int i;
-
-    if (e->mode != NotifyNormal || e->detail == NotifyInferior) return;
-
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].window == e->window) {
-            refocus(ws, &ws->wins[i]);
-            /* Update dwindle focus if in dwindle mode */
-            {
-                Monitor *mon = curmon();
-                if (!mon->horizontal_mode && ws->dwindle_root)
-                    dwindle_set_focus(ws, e->window);
-            }
-            break;
-        }
-    }
-}
-
-/* KeyPress: look up the key binding and dispatch the action. */
-void
-handle_key_press(XKeyEvent *e)
-{
-    KeySym keysym = XLookupKeysym(e, 0);
-    unsigned int mod = e->state & (Mod1Mask | Mod4Mask | ShiftMask | ControlMask);
-    int i;
-
-    for (i = 0; i < (int)num_keys; i++) {
-        if (keys[i].sym == keysym && keys[i].mod == mod) {
-            switch (keys[i].act) {
-            case SPAWN:              spawn(keys[i].arg.v); break;
-            case CLOSE:              close_window(); break;
-            case QUIT:               quit_wm(); break;
-            case FOCUS_NEXT:         focus_cycle(1); break;
-            case FOCUS_PREV:         focus_cycle(-1); break;
-            case SWAP_NEXT:          swap_impl(1); break;
-            case SWAP_PREV:          swap_impl(-1); break;
-            case RESIZE_MASTER:      resize_master((void *)(long)keys[i].arg.i); break;
-            case RESIZE_WINDOW:      resize_window((void *)(long)keys[i].arg.i); break;
-            case SCROLL_LEFT:        move_horizontal(0); break;
-            case SCROLL_RIGHT:       move_horizontal(1); break;
-            case TOGGLE_LAYOUT:      toggle_layout(); break;
-            case TOGGLE_FULLSCREEN:  toggle_fullscreen(); break;
-            case TOGGLE_FLOAT:       toggle_float(); break;
-            case TOGGLE_SCRATCHPAD:  toggle_scratchpad(); break;
-            case MOVE_TO_SCRATCHPAD: move_to_scratchpad(); break;
-            case FIT_WINDOW:         fit_window(); break;
-            case TOGGLE_CENTER_FOCUS: toggle_center_focus(); break;
-            case TOGGLE_MONOCLE:      toggle_monocle(); break;
-            case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
-            case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
-            case FOCUS_MONITOR:      focus_monitor((void *)(long)keys[i].arg.i); break;
-            }
-            break;
-        }
-    }
-}
-
-/* ---- mouse grab helper ---- */
-
-static void
-grab_mouse(ManagedWindow *mw, int resizing, XButtonEvent *e)
-{
-    mouse.active = 1;
-    mouse.resizing = resizing;
-    mouse.win = mw;
-    mouse.start_x = e->x_root;
-    mouse.start_y = e->y_root;
-    if (resizing) {
-        mouse.orig_w = mw->width;
-        mouse.orig_h = mw->height;
-    } else {
-        mouse.orig_x = mw->x;
-        mouse.orig_y = mw->y;
-    }
-    XGrabPointer(dpy, root, True,
-                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                 GrabModeAsync, GrabModeAsync, None, None, e->time);
-}
-
-/* ButtonPress: Super+Button1 moves/drag-swaps, Super+Button3 resizes.
-   For tiled windows (horizontal mode) Button1 swaps columns; for
-   floating windows Button1 moves freely; Button3 on the bottom-right
-   corner (16px hotspot) live-resizes the floating window. */
-void
-handle_button_press(XButtonEvent *e)
-{
-    Workspace *ws = active_ws();
-    Monitor *mon = curmon();
-    int i;
-
-    if (!(e->state & Mod4Mask)) return;
-
-    if (e->button == Button3) {
-        /* Floating resize: bottom-right corner hotspot */
-        for (i = 0; i < ws->nwin; i++) {
-            ManagedWindow *mw = &ws->wins[i];
-            if (!mw->is_floating || mw->is_fullscreen) continue;
-            /* 16px square at bottom-right for resize handle */
-            int rx = mw->x + mw->width - 16;
-            int ry = mw->y + mw->height - 16;
-            if (e->x_root >= rx && e->x_root < mw->x + mw->width
-                && e->y_root >= ry && e->y_root < mw->y + mw->height) {
-                grab_mouse(mw, 1, e);
-                return;
-            }
-        }
-        /* Also allow resize from anywhere on floating window via Button3
-           (fallback if corner not hit) */
-        for (i = 0; i < ws->nwin; i++) {
-            ManagedWindow *mw = &ws->wins[i];
-            if (!mw->is_floating || mw->is_fullscreen) continue;
-            if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
-                && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-                grab_mouse(mw, 1, e);
-                return;
-            }
-        }
-        return;
-    }
-
-    if (e->button != Button1) return;
-
-    /* Try tiled window under cursor (only in horizontal mode) */
-    if (mon->horizontal_mode) {
-        for (i = 0; i < ws->ntiled; i++) {
-            ManagedWindow *mw = ws->tiled[i];
-            int screen_x = mw->x - ws->cam_x;
-            if (e->x_root >= screen_x && e->x_root < screen_x + mw->width
-                && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-                grab_mouse(mw, 0, e);
-                return;
-            }
-        }
-    }
-
-    /* Try floating window under cursor (any layout mode) */
-    for (i = 0; i < ws->nwin; i++) {
-        ManagedWindow *mw = &ws->wins[i];
-        if (!mw->is_floating || mw->is_fullscreen) continue;
-        if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
-            && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-            grab_mouse(mw, 0, e);
-            return;
-        }
-    }
-}
-
-/* ButtonRelease: finalize drag — for tiled windows swap with the closest
-   tiled window under the cursor, then retile.  For floating windows the
-   position set during motion is kept as-is. */
-void
-handle_button_release(XButtonEvent *e)
-{
-    Workspace *ws = active_ws();
-    int i;
-    int best_idx = -1;
-    int best_dist = INT_MAX;
-
-    (void)e;
-
-    if (!mouse.active || !mouse.win) goto done;
-
-    if (mouse.resizing) goto done_floating;
-    {
-        int was_floating = mouse.win->is_floating;
-        if (was_floating) goto done_floating;
-    }
-
-    /* Find the closest non-dragged tiled window to the cursor */
-    for (i = 0; i < ws->ntiled; i++) {
-        ManagedWindow *mw = ws->tiled[i];
-        if (mw == mouse.win) continue;
-        int screen_x = mw->x - ws->cam_x;
-        int cx = screen_x + mw->width / 2;
-        int cy = mw->y + mw->height / 2;
-        int dx = e->x_root - cx;
-        int dy = e->y_root - cy;
-        int dist = dx * dx + dy * dy;
-        if (dist < best_dist) {
-            best_dist = dist;
-            best_idx = i;
-        }
-    }
-
-    if (best_idx >= 0) {
-        /* Swap the dragged window with the closest window in tiled[] */
-        ManagedWindow *a = mouse.win;
-        ManagedWindow *b = ws->tiled[best_idx];
-        int idx_a = -1, j;
-        for (j = 0; j < ws->ntiled; j++) {
-            if (ws->tiled[j] == a) { idx_a = j; break; }
-        }
-        if (idx_a != -1) {
-            ws->tiled[idx_a] = b;
-            ws->tiled[best_idx] = a;
-        }
-    }
-
-done:
-    mouse.active = 0;
-    mouse.resizing = 0;
-    mouse.win = NULL;
-    XUngrabPointer(dpy, CurrentTime);
-    if (ws == &spaces[SCRATCHPAD_IDX])
-        retile_ws(&spaces[SCRATCHPAD_IDX]);
-    else
-        retile_deferred();
-    return;
-
-done_floating:
-    mouse.active = 0;
-    mouse.resizing = 0;
-    mouse.win = NULL;
-    XUngrabPointer(dpy, CurrentTime);
-}
-
-/* MotionNotify: during drag, move or live-resize the dragged window.
-   For resizing (Super+Button3 on floating) the bottom-right corner is
-   dragged.  For moving, floating windows are clamped to the monitor. */
-void
-handle_motion_notify(XMotionEvent *e)
-{
-    Workspace *ws = active_ws();
-    Monitor *mon = curmon();
-    int dx, dy, screen_x;
-
-    if (!mouse.active || !mouse.win) return;
-
-    dx = e->x_root - mouse.start_x;
-    dy = e->y_root - mouse.start_y;
-
-    if (mouse.resizing) {
-        /* Drain coalesced motions, keep only the last for live content */
-        XEvent ev;
-        while (XCheckMaskEvent(dpy, PointerMotionMask, &ev)) {
-            if (ev.type == MotionNotify) {
-                dx = ev.xmotion.x_root - mouse.start_x;
-                dy = ev.xmotion.y_root - mouse.start_y;
-            }
-        }
-        int nw = mouse.orig_w + dx;
-        int nh = mouse.orig_h + dy;
-        nw = nw < MIN_WIN_DIM ? MIN_WIN_DIM : nw;
-        nh = nh < MIN_WIN_DIM ? MIN_WIN_DIM : nh;
-        if (nw > mon->width - 2 * BORDER_WIDTH)  nw = mon->width  - 2 * BORDER_WIDTH;
-        if (nh > mon->height - 2 * BORDER_WIDTH) nh = mon->height - 2 * BORDER_WIDTH;
-        mouse.win->width = nw;
-        mouse.win->height = nh;
-        XMoveResizeWindow(dpy, mouse.win->window,
-                          mouse.win->x, mouse.win->y, nw, nh);
-        return;
-    }
-
-    mouse.win->x = mouse.orig_x + dx;
-    mouse.win->y = mouse.orig_y + dy;
-
-    if (mouse.win->is_floating) {
-        /* Clamp floating window inside monitor */
-        if (mouse.win->x < mon->x) mouse.win->x = mon->x;
-        if (mouse.win->y < mon->y) mouse.win->y = mon->y;
-        if (mouse.win->x + mouse.win->width + 2 * BORDER_WIDTH > mon->x + mon->width)
-            mouse.win->x = mon->x + mon->width - mouse.win->width - 2 * BORDER_WIDTH;
-        if (mouse.win->y + mouse.win->height + 2 * BORDER_WIDTH > mon->y + mon->height)
-            mouse.win->y = mon->y + mon->height - mouse.win->height - 2 * BORDER_WIDTH;
-        XMoveResizeWindow(dpy, mouse.win->window,
-                          mouse.win->x, mouse.win->y,
-                          mouse.win->width, mouse.win->height);
-    } else {
-        screen_x = mouse.win->x - ws->cam_x;
-        XMoveResizeWindow(dpy, mouse.win->window,
-                          screen_x, mouse.win->y,
-                          mouse.win->width, mouse.win->height);
-    }
-}
