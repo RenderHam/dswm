@@ -72,12 +72,7 @@ struct ManagedWindow {
     int monitor        : 3;
     /* cold fields: only on fullscreen toggle / save-restore */
     float saved_factor;
-    int pre_fs_x, pre_fs_y;
-    int pre_fs_width, pre_fs_height;
-    int pre_float_x, pre_float_y;
-    int pre_float_w, pre_float_h;
     int pre_float_idx;
-    int pre_float_cam_x;
 };
 
 /* ---- dwindle tree node ---- */
@@ -217,12 +212,10 @@ extern Atom atom_net_current_desktop;
 extern Atom atom_net_supported;
 extern Atom atom_net_number_of_desktops;
 extern Atom atom_net_active_window;
-extern Atom atom_net_wm_name;
 extern Atom atom_net_wm_window_type;
 extern Atom atom_net_wm_type_desktop;
 extern Atom atom_net_wm_type_dock;
 extern Atom atom_net_wm_type_splash;
-extern Atom atom_net_wm_type_normal;
 extern Atom atom_net_wm_type_dialog;
 extern Atom atom_net_wm_type_util;
 extern Atom atom_net_wm_type_toolbar;
@@ -232,7 +225,6 @@ extern Atom atom_net_wm_type_menu;
 extern Atom atom_net_wm_state_above;
 extern Atom atom_net_wm_state_sticky;
 extern Atom atom_net_wm_state_not_focusable;
-extern Atom atom_motif_wm_hints;
 
 /* ---- globals (owned by layout.c) ---- */
 
@@ -265,6 +257,8 @@ void toggle_monocle(void);
 DwindleNode *dwindle_node_new(Window w);
 void     dwindle_insert(Workspace *ws, Window w);
 void     dwindle_remove(Workspace *ws, Window w);
+void     layout_insert(Workspace *ws, Window w);
+void     layout_remove(Workspace *ws, Window w);
 void     dwindle_arrange(Workspace *ws, Monitor *mon);
 void     dwindle_cleanup(Workspace *ws);
 void     dwindle_focus_prevnext(Workspace *ws, int delta);

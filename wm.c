@@ -159,18 +159,12 @@ swap_impl(int delta)
 {
     Workspace *ws = active_ws();
     ManagedWindow tmp;
-    int cur_idx = -1, swap_idx, i;
+    int cur_idx, swap_idx;
 
-    if (ws->nwin < 2) return;
+    if (ws->nwin < 2 || !ws->focused) return;
 
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->focused && ws->wins[i].window == ws->focused->window) {
-            cur_idx = i;
-            break;
-        }
-    }
-
-    if (cur_idx == -1 || ws->wins[cur_idx].is_floating) return;
+    cur_idx = ws->focused - ws->wins;
+    if (ws->wins[cur_idx].is_floating) return;
 
     swap_idx = cur_idx + delta;
     if (swap_idx < 0 || swap_idx >= ws->nwin) return;
@@ -249,8 +243,7 @@ move_to_workspace(void *arg)
     win = *ws->focused;
 
     /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
-    if (!curmon()->horizontal_mode)
-        dwindle_remove(ws, win.window);
+    layout_remove(ws, win.window);
 
     int removed = -1;
     for (i = 0; i < ws->nwin; i++) {
@@ -276,8 +269,7 @@ move_to_workspace(void *arg)
     rebuild_tiled(target);
 
     /* Insert into dwindle tree on target workspace if in dwindle mode */
-    if (!curmon()->horizontal_mode)
-        dwindle_insert(target, win.window);
+    layout_insert(target, win.window);
 
     /* Sticky windows stay mapped on all workspaces */
     if (!win.is_sticky)
@@ -462,9 +454,7 @@ manage_window(Window w)
 
     /* In dwindle mode, insert tiled windows into dwindle tree */
     if (!mw.is_floating && !mw.is_fullscreen) {
-        Monitor *mon = curmon();
-        if (!mon->horizontal_mode)
-            dwindle_insert(ws, w);
+        layout_insert(ws, w);
     }
 
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask | PropertyChangeMask);
@@ -511,8 +501,7 @@ unmanage_window(Window w, int force)
             if (ws->wins[i].window == w) {
                 removed = i;
                 /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
-                if (!curmon()->horizontal_mode)
-                    dwindle_remove(ws, w);
+                layout_remove(ws, w);
                 memmove(&ws->wins[i], &ws->wins[i + 1],
                         (ws->nwin - i - 1) * sizeof(ManagedWindow));
                 ws->nwin--;
@@ -561,14 +550,18 @@ focus_cycle(int delta)
     }
     if (idx == -1) return;
 
-    /* Walk in the given direction, skipping not-focusable windows */
+    /* Walk in the given direction, skipping not-focusable, wrapping at edges */
     int new_idx = idx + delta;
-    while (new_idx >= 0 && new_idx < ws->ntiled) {
+    int visited = 0;
+    while (visited < ws->ntiled) {
+        if (new_idx < 0) new_idx = ws->ntiled - 1;
+        else if (new_idx >= ws->ntiled) new_idx = 0;
         if (!ws->tiled[new_idx]->is_not_focusable)
             break;
         new_idx += delta;
+        visited++;
     }
-    if (new_idx < 0 || new_idx >= ws->ntiled) return;
+    if (visited >= ws->ntiled) return;
 
     refocus(ws, ws->tiled[new_idx]);
 
@@ -614,20 +607,14 @@ toggle_fullscreen(void)
 
     if (w->is_fullscreen) {
         tiled_remove(ws, w->window);
-        if (!curmon()->horizontal_mode)
-            dwindle_remove(ws, w->window);
+        layout_remove(ws, w->window);
     } else {
         /* Re-insert into layout BEFORE restoring is_floating */
         tiled_add(ws, w);
-        if (!curmon()->horizontal_mode)
-            dwindle_insert(ws, w->window);
+        layout_insert(ws, w->window);
     }
 
     if (w->is_fullscreen) {
-        w->pre_fs_x = w->x;
-        w->pre_fs_y = w->y;
-        w->pre_fs_width = w->width;
-        w->pre_fs_height = w->height;
         w->pre_fs_floating = w->is_floating;
         w->is_floating = 1;
 
@@ -643,12 +630,7 @@ toggle_fullscreen(void)
                         PropModeReplace, (unsigned char *)&atom_net_wm_state_full, 1);
     } else {
         w->is_floating = w->pre_fs_floating;
-        w->x = w->pre_fs_x;
-        w->y = w->pre_fs_y;
-        w->width = w->pre_fs_width;
-        w->height = w->pre_fs_height;
         XSetWindowBorderWidth(dpy, w->window, BORDER_WIDTH);
-        XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
 
         /* Rebuild _NET_WM_STATE, preserving above/sticky/not_focusable */
         {
@@ -683,16 +665,10 @@ toggle_float(void)
         for (i = 0; i < ws->ntiled; i++) {
             if (ws->tiled[i] == w) { idx = i; break; }
         }
-        w->pre_float_x = w->x;
-        w->pre_float_y = w->y;
-        w->pre_float_w = w->width;
-        w->pre_float_h = w->height;
         w->pre_float_idx = idx;
-        w->pre_float_cam_x = ws->cam_x;
 
         tiled_remove(ws, w->window);
-        if (!mon->horizontal_mode)
-            dwindle_remove(ws, w->window);
+        layout_remove(ws, w->window);
         w->is_floating = 1;
 
         /* Center on the current monitor (not global scrw/scrh) */
@@ -719,8 +695,7 @@ toggle_float(void)
         ws->ntiled++;
 
         /* Re-insert into dwindle tree if in dwindle mode */
-        if (!mon->horizontal_mode)
-            dwindle_insert(ws, w->window);
+        layout_insert(ws, w->window);
 
         /* Retile in the correct layout mode so snap-back works in both
            scrolling and stacking layouts. */
@@ -865,8 +840,7 @@ move_to_scratchpad(void)
     win = *src->focused;
 
     /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
-    if (!curmon()->horizontal_mode)
-        dwindle_remove(src, win.window);
+    layout_remove(src, win.window);
 
     int removed = -1;
     for (i = 0; i < src->nwin; i++) {
@@ -990,5 +964,308 @@ spawn(void *arg)
         fprintf(stderr, "dswm: execvp %s failed\n", cmd[0]);
         _exit(1);
     }
+}
+
+/* ---- X event handlers ---- */
+
+static void
+grab_mouse(ManagedWindow *mw, int resizing, XButtonEvent *e)
+{
+    mouse.active = 1;
+    mouse.resizing = resizing;
+    mouse.win = mw;
+    mouse.start_x = e->x_root;
+    mouse.start_y = e->y_root;
+    if (resizing) {
+        mouse.orig_w = mw->width;
+        mouse.orig_h = mw->height;
+    } else {
+        mouse.orig_x = mw->x;
+        mouse.orig_y = mw->y;
+    }
+    XGrabPointer(dpy, root, True,
+                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+                 GrabModeAsync, GrabModeAsync, None, None, e->time);
+}
+
+void
+handle_map_request(XMapRequestEvent *e)
+{
+    manage_window(e->window);
+}
+
+void
+handle_destroy_notify(XDestroyWindowEvent *e)
+{
+    unmanage_window(e->window, 1);
+}
+
+void
+handle_unmap_notify(XUnmapEvent *e)
+{
+    unmanage_window(e->window, 0);
+}
+
+void
+handle_configure_request(XConfigureRequestEvent *e)
+{
+    Workspace *ws = active_ws();
+    ManagedWindow *mw = NULL;
+    int i;
+
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].window == e->window) {
+            mw = &ws->wins[i];
+            break;
+        }
+    }
+
+    if (mw && !mw->is_floating && !mw->is_fullscreen) {
+        XWindowChanges wc;
+        wc.sibling = e->above;
+        wc.stack_mode = e->detail;
+        XConfigureWindow(dpy, e->window, CWSibling | CWStackMode, &wc);
+        return;
+    }
+
+    XWindowChanges wc;
+    wc.x = e->x;
+    wc.y = e->y;
+    wc.width = e->width;
+    wc.height = e->height;
+    wc.border_width = e->border_width;
+    wc.sibling = e->above;
+    wc.stack_mode = e->detail;
+    XConfigureWindow(dpy, e->window, e->value_mask, &wc);
+}
+
+void
+handle_enter_notify(XCrossingEvent *e)
+{
+    Workspace *ws = active_ws();
+    int i;
+
+    if (e->mode != NotifyNormal || e->detail == NotifyInferior) return;
+
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].window == e->window) {
+            if (ws->wins[i].is_not_focusable) break;
+            refocus(ws, &ws->wins[i]);
+            {
+                Monitor *mon = curmon();
+                if (!mon->horizontal_mode && ws->dwindle_root)
+                    dwindle_set_focus(ws, e->window);
+            }
+            break;
+        }
+    }
+}
+
+void
+handle_key_press(XKeyEvent *e)
+{
+    KeySym keysym = XLookupKeysym(e, 0);
+    unsigned int mod = e->state & (Mod1Mask | Mod4Mask | ShiftMask | ControlMask);
+    int i;
+
+    for (i = 0; i < (int)num_keys; i++) {
+        if (keys[i].sym == keysym && keys[i].mod == mod) {
+            switch (keys[i].act) {
+            case SPAWN:              spawn(keys[i].arg.v); break;
+            case CLOSE:              close_window(); break;
+            case QUIT:               quit_wm(); break;
+            case FOCUS_NEXT:         focus_cycle(1); break;
+            case FOCUS_PREV:         focus_cycle(-1); break;
+            case SWAP_NEXT:          swap_impl(1); break;
+            case SWAP_PREV:          swap_impl(-1); break;
+            case RESIZE_MASTER:      resize_master((void *)(long)keys[i].arg.i); break;
+            case RESIZE_WINDOW:      resize_window((void *)(long)keys[i].arg.i); break;
+            case SCROLL_LEFT:        move_horizontal(0); break;
+            case SCROLL_RIGHT:       move_horizontal(1); break;
+            case TOGGLE_LAYOUT:      toggle_layout(); break;
+            case TOGGLE_FULLSCREEN:  toggle_fullscreen(); break;
+            case TOGGLE_FLOAT:       toggle_float(); break;
+            case TOGGLE_SCRATCHPAD:  toggle_scratchpad(); break;
+            case MOVE_TO_SCRATCHPAD: move_to_scratchpad(); break;
+            case FIT_WINDOW:         if (fit_window()) toggle_fullscreen(); break;
+            case TOGGLE_CENTER_FOCUS: toggle_center_focus(); break;
+            case TOGGLE_MONOCLE:      toggle_monocle(); break;
+            case SWITCH_WORKSPACE:   switch_workspace((void *)(long)keys[i].arg.i); break;
+            case MOVE_TO_WORKSPACE:  move_to_workspace((void *)(long)keys[i].arg.i); break;
+            case FOCUS_MONITOR:      focus_monitor((void *)(long)keys[i].arg.i); break;
+            }
+            break;
+        }
+    }
+}
+
+void
+handle_button_press(XButtonEvent *e)
+{
+    Workspace *ws = active_ws();
+    int i;
+
+    if (!(e->state & Mod4Mask)) return;
+
+    if (e->button == Button3) {
+        for (i = 0; i < ws->nwin; i++) {
+            ManagedWindow *mw = &ws->wins[i];
+            if (!mw->is_floating || mw->is_fullscreen) continue;
+            if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
+                && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
+                grab_mouse(mw, 1, e);
+                return;
+            }
+        }
+        return;
+    }
+
+    if (e->button != Button1) return;
+
+    for (i = 0; i < ws->nwin; i++) {
+        ManagedWindow *mw = &ws->wins[i];
+        if (!mw->is_floating || mw->is_fullscreen) continue;
+        if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
+            && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
+            grab_mouse(mw, 0, e);
+            return;
+        }
+    }
+}
+
+void
+handle_button_release(XButtonEvent *e)
+{
+    (void)e;
+
+    if (!mouse.active || !mouse.win) goto done;
+
+done:
+    mouse.active = 0;
+    mouse.resizing = 0;
+    mouse.win = NULL;
+    XUngrabPointer(dpy, CurrentTime);
+    if (mouse.win && !mouse.win->is_floating)
+        retile_deferred();
+}
+
+void
+handle_motion_notify(XMotionEvent *e)
+{
+    Monitor *mon = curmon();
+    int dx, dy;
+
+    if (!mouse.active || !mouse.win) return;
+
+    dx = e->x_root - mouse.start_x;
+    dy = e->y_root - mouse.start_y;
+
+    if (mouse.resizing) {
+        XEvent ev;
+        while (XCheckMaskEvent(dpy, PointerMotionMask, &ev)) {
+            if (ev.type == MotionNotify) {
+                dx = ev.xmotion.x_root - mouse.start_x;
+                dy = ev.xmotion.y_root - mouse.start_y;
+            }
+        }
+        int nw = mouse.orig_w + dx;
+        int nh = mouse.orig_h + dy;
+        nw = nw < MIN_WIN_DIM ? MIN_WIN_DIM : nw;
+        nh = nh < MIN_WIN_DIM ? MIN_WIN_DIM : nh;
+        if (nw > mon->width - 2 * BORDER_WIDTH)  nw = mon->width  - 2 * BORDER_WIDTH;
+        if (nh > mon->height - 2 * BORDER_WIDTH) nh = mon->height - 2 * BORDER_WIDTH;
+        mouse.win->width = nw;
+        mouse.win->height = nh;
+        XMoveResizeWindow(dpy, mouse.win->window,
+                          mouse.win->x, mouse.win->y, nw, nh);
+        return;
+    }
+
+    mouse.win->x = mouse.orig_x + dx;
+    mouse.win->y = mouse.orig_y + dy;
+    if (mouse.win->x < mon->x) mouse.win->x = mon->x;
+    if (mouse.win->y < mon->y) mouse.win->y = mon->y;
+    if (mouse.win->x + mouse.win->width + 2 * BORDER_WIDTH > mon->x + mon->width)
+        mouse.win->x = mon->x + mon->width - mouse.win->width - 2 * BORDER_WIDTH;
+    if (mouse.win->y + mouse.win->height + 2 * BORDER_WIDTH > mon->y + mon->height)
+        mouse.win->y = mon->y + mon->height - mouse.win->height - 2 * BORDER_WIDTH;
+    XMoveResizeWindow(dpy, mouse.win->window,
+                      mouse.win->x, mouse.win->y,
+                      mouse.win->width, mouse.win->height);
+}
+
+void
+handle_property_notify(XPropertyEvent *e)
+{
+    Workspace *ws;
+    ManagedWindow *mw = NULL;
+    int i, j;
+
+    if (e->atom != atom_net_wm_state) return;
+
+    for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+        ws = &spaces[j];
+        for (i = 0; i < ws->nwin; i++) {
+            if (ws->wins[i].window == e->window) {
+                mw = &ws->wins[i];
+                break;
+            }
+        }
+        if (mw) break;
+    }
+    if (!mw) return;
+
+    Atom actual;
+    int fmt;
+    unsigned long n, remain;
+    unsigned char *data = NULL;
+    int was_above = mw->is_above;
+    int was_sticky = mw->is_sticky;
+
+    mw->is_above = 0;
+    mw->is_sticky = 0;
+    mw->is_not_focusable = 0;
+
+    if (XGetWindowProperty(dpy, e->window, atom_net_wm_state, 0, 32, False,
+                           XA_ATOM, &actual, &fmt, &n, &remain,
+                           &data) == Success && data) {
+        if (actual == XA_ATOM && fmt == 32) {
+            Atom *states = (Atom *)data;
+            unsigned long si;
+            for (si = 0; si < n; si++) {
+                if (states[si] == atom_net_wm_state_above)
+                    mw->is_above = 1;
+                else if (states[si] == atom_net_wm_state_sticky)
+                    mw->is_sticky = 1;
+                else if (states[si] == atom_net_wm_state_not_focusable)
+                    mw->is_not_focusable = 1;
+            }
+        }
+        XFree(data);
+    }
+
+    if (mw->is_above || mw->is_sticky)
+        mw->is_floating = 1;
+
+    if (mw->is_above && !was_above)
+        XRaiseWindow(dpy, mw->window);
+
+    if (mw->is_sticky && !was_sticky) {
+        for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+            if (j == mw->workspace) continue;
+            XMapWindow(dpy, mw->window);
+        }
+    }
+
+    if (!mw->is_sticky && was_sticky) {
+        for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+            if (j == cur_ws) continue;
+            if (j == mw->workspace) continue;
+            XUnmapWindow(dpy, mw->window);
+        }
+    }
+
+    if (mw->is_above != was_above || mw->is_sticky != was_sticky)
+        retile_deferred();
 }
 

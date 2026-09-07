@@ -42,12 +42,10 @@ Atom atom_net_current_desktop;
 Atom atom_net_supported;
 Atom atom_net_number_of_desktops;
 Atom atom_net_active_window;
-Atom atom_net_wm_name;
 Atom atom_net_wm_window_type;
 Atom atom_net_wm_type_desktop;
 Atom atom_net_wm_type_dock;
 Atom atom_net_wm_type_splash;
-Atom atom_net_wm_type_normal;
 Atom atom_net_wm_type_dialog;
 Atom atom_net_wm_type_util;
 Atom atom_net_wm_type_toolbar;
@@ -57,7 +55,6 @@ Atom atom_net_wm_type_menu;
 Atom atom_net_wm_state_above;
 Atom atom_net_wm_state_sticky;
 Atom atom_net_wm_state_not_focusable;
-Atom atom_motif_wm_hints;
 
 /* ---- shell commands ---- */
 
@@ -160,19 +157,17 @@ setup_ewmh(void)
                         atom_net_current_desktop,
                         atom_net_number_of_desktops,
                         atom_net_active_window,
-                        atom_net_wm_name,
                         atom_net_wm_window_type,
                         atom_net_wm_type_desktop,
                         atom_net_wm_type_dock,
                         atom_net_wm_type_splash,
-                        atom_net_wm_type_normal,
                         atom_net_wm_type_dialog,
                         atom_net_wm_type_util,
                         atom_net_wm_type_toolbar,
                         atom_net_wm_state_above,
                         atom_net_wm_state_sticky,
                         atom_net_wm_state_not_focusable,
-                    }, 17);
+                    }, 15);
 
     update_ewmh_current_desktop();
     XDeleteProperty(dpy, root, atom_net_active_window);
@@ -193,12 +188,10 @@ cache_atoms(void)
     atom_net_supported = XInternAtom(dpy, "_NET_SUPPORTED", False);
     atom_net_number_of_desktops = XInternAtom(dpy, "_NET_NUMBER_OF_DESKTOPS", False);
     atom_net_active_window = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
-    atom_net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
     atom_net_wm_window_type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
     atom_net_wm_type_desktop = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
     atom_net_wm_type_dock = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
     atom_net_wm_type_splash = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_SPLASH", False);
-    atom_net_wm_type_normal = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_NORMAL", False);
     atom_net_wm_type_dialog = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DIALOG", False);
     atom_net_wm_type_util = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_UTIL", False);
     atom_net_wm_type_toolbar = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_TOOLBAR", False);
@@ -208,7 +201,6 @@ cache_atoms(void)
     atom_net_wm_state_above = XInternAtom(dpy, "_NET_WM_STATE_ABOVE", False);
     atom_net_wm_state_sticky = XInternAtom(dpy, "_NET_WM_STATE_STICKY", False);
     atom_net_wm_state_not_focusable = XInternAtom(dpy, "_NET_WM_STATE_NOT_FOCUSABLE", False);
-    atom_motif_wm_hints = XInternAtom(dpy, "_MOTIF_WM_HINTS", False);
 }
 
 /* ---- key grabbing ---- */

@@ -506,7 +506,7 @@ toggle_layout(void)
         rebuild_tiled(ws);
         ws->dwindle_monocle = 0;
         for (i = 0; i < ws->ntiled; i++)
-            dwindle_insert(ws, ws->tiled[i]->window);
+            layout_insert(ws, ws->tiled[i]->window);
         dwindle_arrange(ws, mon);
     }
 }
@@ -670,6 +670,22 @@ dwindle_remove(Workspace *ws, Window w)
 
     free(parent);
     free(leaf);
+}
+
+/* ---- layout-mode wrappers ---- */
+
+void
+layout_insert(Workspace *ws, Window w)
+{
+    if (!curmon()->horizontal_mode)
+        dwindle_insert(ws, w);
+}
+
+void
+layout_remove(Workspace *ws, Window w)
+{
+    if (!curmon()->horizontal_mode)
+        dwindle_remove(ws, w);
 }
 
 /* Recursive rectangle layout. */
