@@ -256,7 +256,10 @@ tile_horizontal_ws(Workspace *ws)
         float f = ws->tiled[i]->width_factor;
         if (f < MIN_WIDTH_FACTOR) f = MIN_WIDTH_FACTOR;
         if (f > MAX_WIDTH_FACTOR) f = MAX_WIDTH_FACTOR;
-        col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
+        if (ws->ntiled == 1)
+            col_w = usable_w;
+        else
+            col_w = (int)((usable_w / (float)COLUMN_DIVISOR) * f);
         if (col_w < MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH)
             col_w = MIN_WIN_DIM + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
         if (col_w > usable_w) col_w = usable_w;
