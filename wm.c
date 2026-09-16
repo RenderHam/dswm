@@ -95,6 +95,11 @@ refocus(Workspace *ws, ManagedWindow *next)
         update_border(next->window, 1);
         XSetInputFocus(dpy, next->window, RevertToPointerRoot, CurrentTime);
         XRaiseWindow(dpy, next->window);
+        /* Update _NET_ACTIVE_WINDOW for pagers/taskbars */
+        XChangeProperty(dpy, root, atom_net_active_window, XA_WINDOW, 32,
+                        PropModeReplace, (unsigned char *)&next->window, 1);
+    } else {
+        XDeleteProperty(dpy, root, atom_net_active_window);
     }
 }
 
@@ -680,15 +685,34 @@ close_window(void)
 {
     Workspace *ws = active_ws();
     XEvent ev;
+    Atom *protocols = NULL;
+    int nprotocols = 0;
+    int supports_delete = 0;
+    int i;
 
     if (!ws->focused) return;
 
-    ev.xclient.type = ClientMessage;
-    ev.xclient.window = ws->focused->window;
-    ev.xclient.message_type = atom_wm_protocols;
-    ev.xclient.format = 32;
-    ev.xclient.data.l[0] = atom_wm_delete;
-    XSendEvent(dpy, ws->focused->window, False, NoEventMask, &ev);
+    /* Check if window supports WM_DELETE_WINDOW */
+    if (XGetWMProtocols(dpy, ws->focused->window, &protocols, &nprotocols)) {
+        for (i = 0; i < nprotocols; i++) {
+            if (protocols[i] == atom_wm_delete) {
+                supports_delete = 1;
+                break;
+            }
+        }
+        XFree(protocols);
+    }
+
+    if (supports_delete) {
+        ev.xclient.type = ClientMessage;
+        ev.xclient.window = ws->focused->window;
+        ev.xclient.message_type = atom_wm_protocols;
+        ev.xclient.format = 32;
+        ev.xclient.data.l[0] = atom_wm_delete;
+        XSendEvent(dpy, ws->focused->window, False, NoEventMask, &ev);
+    } else {
+        XKillClient(dpy, ws->focused->window);
+    }
 }
 
 void

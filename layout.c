@@ -95,10 +95,10 @@ rebuild_tiled(Workspace *ws)
 
 /* ---- bar strut support ---- */
 
-/* Read _NET_WM_STRUT from every window on the current workspace.
-   Struts are reserved screen edges (e.g. panel bars) that tiled windows
-   must avoid.  Results are cached in mon->strut_* and invalidated on
-   window add/remove via strut_valid. */
+/* Read _NET_WM_STRUT from windows on the current workspace AND from
+   unmanaged root children (e.g. polybar docks).  Struts are reserved
+   screen edges that tiled windows must avoid.  Results are cached in
+   mon->strut_* and invalidated on window add/remove via strut_valid. */
 static void
 compute_struts(Monitor *mon)
 {
@@ -116,23 +116,57 @@ compute_struts(Monitor *mon)
     mon->strut_left = 0;
     mon->strut_right = 0;
 
+    /* Check managed windows on current workspace */
     for (i = 0; i < ws->nwin; i++) {
         if (XGetWindowProperty(dpy, ws->wins[i].window, atom_net_wm_strut,
                                0, 4, False, XA_CARDINAL, &actual, &format,
                                &nitems, &bytes_after, &data) == Success) {
             if (data && actual == XA_CARDINAL && format == 32 && nitems >= 4) {
                 long *strut = (long *)data;
-                if (strut[0] > 0 && ws->wins[i].x < mon->x + mon->width)
+                if (strut[0] > 0 && ws->wins[i].x + ws->wins[i].width > mon->x)
                     if (strut[0] > mon->strut_left) mon->strut_left = strut[0];
-                if (strut[1] > 0 && ws->wins[i].x + ws->wins[i].width > mon->x)
+                if (strut[1] > 0 && ws->wins[i].x < mon->x + mon->width)
                     if (strut[1] > mon->strut_right) mon->strut_right = strut[1];
-                if (strut[2] > 0 && ws->wins[i].y < mon->y + mon->height)
+                if (strut[2] > 0 && ws->wins[i].y + ws->wins[i].height > mon->y)
                     if (strut[2] > mon->strut_top) mon->strut_top = strut[2];
-                if (strut[3] > 0 && ws->wins[i].y + ws->wins[i].height > mon->y)
+                if (strut[3] > 0 && ws->wins[i].y < mon->y + mon->height)
                     if (strut[3] > mon->strut_bottom) mon->strut_bottom = strut[3];
             }
             if (data) XFree(data);
             data = NULL;
+        }
+    }
+
+    /* Also check unmanaged root children (WIN_SKIP docks like polybar) */
+    {
+        Window root_ret, parent_ret, *children = NULL;
+        unsigned int nchildren = 0;
+        if (XQueryTree(dpy, root, &root_ret, &parent_ret, &children, &nchildren)) {
+            for (i = 0; i < (int)nchildren; i++) {
+                XWindowAttributes wa;
+                if (!XGetWindowAttributes(dpy, children[i], &wa)) continue;
+                if (wa.map_state != IsViewable) continue;
+
+                if (XGetWindowProperty(dpy, children[i], atom_net_wm_strut,
+                                       0, 4, False, XA_CARDINAL, &actual,
+                                       &format, &nitems, &bytes_after,
+                                       &data) == Success) {
+                    if (data && actual == XA_CARDINAL && format == 32 && nitems >= 4) {
+                        long *strut = (long *)data;
+                        if (strut[0] > 0 && wa.x + wa.width > mon->x)
+                            if (strut[0] > mon->strut_left) mon->strut_left = strut[0];
+                        if (strut[1] > 0 && wa.x < mon->x + mon->width)
+                            if (strut[1] > mon->strut_right) mon->strut_right = strut[1];
+                        if (strut[2] > 0 && wa.y + wa.height > mon->y)
+                            if (strut[2] > mon->strut_top) mon->strut_top = strut[2];
+                        if (strut[3] > 0 && wa.y < mon->y + mon->height)
+                            if (strut[3] > mon->strut_bottom) mon->strut_bottom = strut[3];
+                    }
+                    if (data) XFree(data);
+                    data = NULL;
+                }
+            }
+            if (children) XFree(children);
         }
     }
 
