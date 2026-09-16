@@ -69,6 +69,7 @@ const char *vol_down[]    = { "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "2%
 const char *vol_mute[]    = { "wpctl", "set-mute",   "@DEFAULT_AUDIO_SINK@", "toggle", NULL };
 const char *bright_up[]   = { "brightnessctl", "s", "2%+",  NULL };
 const char *bright_down[] = { "brightnessctl", "s", "2%-",  NULL };
+const char *power_off[]   = { "sh", "-c", "~/.config/rofi/power/power.sh", NULL };
 const char *dim[]         = { "pkill", "-USR1", "redshift",  NULL };
 
 /* ---- window rules ---- */
@@ -118,6 +119,7 @@ Key keys[] = {
     { 0, XF86XK_AudioMute,         SPAWN, { .v = vol_mute    } },
     { 0, XF86XK_MonBrightnessUp,   SPAWN, { .v = bright_up   } },
     { 0, XF86XK_MonBrightnessDown, SPAWN, { .v = bright_down } },
+    { 0, XF86XK_PowerOff, SPAWN, { .v = power_off} },
 };
 
 const size_t num_keys = sizeof(keys) / sizeof(keys[0]);
@@ -138,7 +140,6 @@ update_ewmh_current_desktop(void)
     long desktop = cur_ws;
     XChangeProperty(dpy, root, atom_net_current_desktop, XA_CARDINAL, 32,
                     PropModeReplace, (unsigned char *)&desktop, 1);
-    XFlush(dpy);
 }
 
 /* Write all supported EWMH atoms and initial desktop count at startup. */

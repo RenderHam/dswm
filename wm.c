@@ -1138,15 +1138,10 @@ handle_button_release(XButtonEvent *e)
 {
     (void)e;
 
-    if (!mouse.active || !mouse.win) goto done;
-
-done:
     mouse.active = 0;
     mouse.resizing = 0;
     mouse.win = NULL;
     XUngrabPointer(dpy, CurrentTime);
-    if (mouse.win && !mouse.win->is_floating)
-        retile_deferred();
 }
 
 void

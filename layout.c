@@ -769,6 +769,7 @@ dwindle_arrange(Workspace *ws, Monitor *mon)
                 }
             }
         }
+        XFlush(dpy);
         return;
     }
 
@@ -893,29 +894,6 @@ toggle_monocle(void)
     if (mon->horizontal_mode) return;
 
     ws->dwindle_monocle = !ws->dwindle_monocle;
-
-    /* If entering monocle, hide all non-focused tiled windows */
-    if (ws->dwindle_monocle) {
-        DwindleNode *leaves[MAX_LEAVES];
-        int nleaves = dwindle_collect_leaves(ws, leaves, MAX_LEAVES);
-        int li;
-        for (li = 0; li < nleaves; li++) {
-            if (leaves[li] != ws->dwindle_focus) {
-                ManagedWindow *mw = dwindle_find_mw(ws, leaves[li]->win);
-                if (mw) XUnmapWindow(dpy, mw->window);
-            }
-        }
-    } else {
-        /* Exiting monocle: show all tiled windows */
-        DwindleNode *leaves[MAX_LEAVES];
-        int nleaves = dwindle_collect_leaves(ws, leaves, MAX_LEAVES);
-        int li;
-        for (li = 0; li < nleaves; li++) {
-            ManagedWindow *mw = dwindle_find_mw(ws, leaves[li]->win);
-            if (mw && !mw->is_floating && !mw->is_fullscreen)
-                XMapWindow(dpy, mw->window);
-        }
-    }
 
     dwindle_arrange(ws, mon);
 }
