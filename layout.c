@@ -440,15 +440,20 @@ fit_window(void)
    collapse into a single retile.  retile_deferred() sets a flag;
    flush_retile() (called once per event) performs the actual layout. */
 
-/* Raise all _NET_WM_STATE_ABOVE and _NET_WM_STATE_STICKY windows above
-   everything.  Called after every tiling pass to maintain correct stacking
-   for widgets/panels that request always-on-top behavior. */
+/* Raise all floating windows above tiled.  Called after every tiling pass
+   to maintain correct stacking — tiled windows are moved via
+   XMoveResizeWindow which can change stacking order. */
 static void
 raise_above_windows(Workspace *ws)
 {
     int i;
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].is_above || ws->wins[i].is_sticky)
+            XRaiseWindow(dpy, ws->wins[i].window);
+    }
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].is_floating && !ws->wins[i].is_fullscreen &&
+            !ws->wins[i].is_above && !ws->wins[i].is_sticky)
             XRaiseWindow(dpy, ws->wins[i].window);
     }
 }

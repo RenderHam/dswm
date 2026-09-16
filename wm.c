@@ -263,6 +263,15 @@ move_to_workspace(void *arg)
     Workspace *target = &spaces[idx];
     if (!wins_ensure_cap(target)) err(1, "wins_ensure_cap");
     win.workspace = idx;
+
+    /* Clamp floating windows to virtual screen bounds */
+    if (win.is_floating) {
+        if (win.x < 0) win.x = 0;
+        if (win.y < 0) win.y = 0;
+        if (win.x + win.width > scrw) win.x = scrw - win.width;
+        if (win.y + win.height > scrh) win.y = scrh - win.height;
+    }
+
     target->wins[target->nwin++] = win;
     target->focused = &target->wins[target->nwin - 1];
 
@@ -449,6 +458,15 @@ manage_window(Window w)
     apply_rules(&mw, w);
     read_net_wm_state(&mw, w);
 
+    /* Center floating windows on current monitor */
+    if (mw.is_floating && !mw.is_fullscreen) {
+        Monitor *mon = curmon();
+        mw.width = mw.width > mon->width ? mon->width : mw.width;
+        mw.height = mw.height > mon->height ? mon->height : mw.height;
+        mw.x = mon->x + (mon->width - mw.width) / 2;
+        mw.y = mon->y + (mon->height - mw.height) / 2;
+    }
+
     insert_idx = insert_into_workspace(ws, mw);
     if (insert_idx == -1) err(1, "wins_ensure_cap");
 
@@ -461,6 +479,13 @@ manage_window(Window w)
 
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask | PropertyChangeMask);
     XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
+
+    /* Position floating windows before mapping to avoid one-frame jump */
+    if (mw.is_floating && !mw.is_fullscreen) {
+        XMoveResizeWindow(dpy, w, mw.x, mw.y, mw.width, mw.height);
+        XRaiseWindow(dpy, w);
+    }
+
     refocus(ws, &ws->wins[insert_idx]);
 
     if (mw.workspace == cur_ws || ws == &spaces[SCRATCHPAD_IDX]) {
@@ -1146,6 +1171,14 @@ handle_configure_request(XConfigureRequestEvent *e)
     wc.sibling = e->above;
     wc.stack_mode = e->detail;
     XConfigureWindow(dpy, e->window, e->value_mask, &wc);
+
+    /* Sync managed state after proxying floating configure */
+    if (mw) {
+        if (e->value_mask & CWX)      mw->x = e->x;
+        if (e->value_mask & CWY)      mw->y = e->y;
+        if (e->value_mask & CWWidth)  mw->width = e->width;
+        if (e->value_mask & CWHeight) mw->height = e->height;
+    }
 }
 
 void
@@ -1217,11 +1250,12 @@ handle_button_press(XButtonEvent *e)
     if (!(e->state & Mod4Mask)) return;
 
     if (e->button == Button3) {
-        for (i = 0; i < ws->nwin; i++) {
+        for (i = ws->nwin - 1; i >= 0; i--) {
             ManagedWindow *mw = &ws->wins[i];
             if (!mw->is_floating || mw->is_fullscreen) continue;
             if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
                 && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
+                if (ws->focused != mw) refocus(ws, mw);
                 grab_mouse(mw, 1, e);
                 return;
             }
@@ -1231,11 +1265,12 @@ handle_button_press(XButtonEvent *e)
 
     if (e->button != Button1) return;
 
-    for (i = 0; i < ws->nwin; i++) {
+    for (i = ws->nwin - 1; i >= 0; i--) {
         ManagedWindow *mw = &ws->wins[i];
         if (!mw->is_floating || mw->is_fullscreen) continue;
         if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
             && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
+            if (ws->focused != mw) refocus(ws, mw);
             grab_mouse(mw, 0, e);
             return;
         }
