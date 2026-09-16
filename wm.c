@@ -348,7 +348,9 @@ read_net_wm_state(ManagedWindow *mw, Window w)
 
     Atom *states = (Atom *)data;
     for (i = 0; i < n; i++) {
-        if (states[i] == atom_net_wm_state_above) {
+        if (states[i] == atom_net_wm_state_full) {
+            mw->is_fullscreen = 1;
+        } else if (states[i] == atom_net_wm_state_above) {
             mw->is_above = 1;
             mw->is_floating = 1;
         } else if (states[i] == atom_net_wm_state_sticky) {
@@ -569,6 +571,83 @@ focus_cycle(int delta)
         update_camera_ws(curws());
 }
 
+/* ---- client messages ---- */
+
+void
+handle_client_message(XClientMessageEvent *e)
+{
+    Workspace *ws = active_ws();
+    ManagedWindow *mw = NULL;
+    int i, j;
+
+    if (e->message_type == atom_net_wm_state) {
+        /* _NET_WM_STATE: data.l[0] = action, data.l[1]/[2] = property atoms */
+        int action = e->data.l[0];
+        Atom prop1 = e->data.l[1];
+        Atom prop2 = e->data.l[2];
+
+        /* Find managed window */
+        for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+            for (i = 0; i < spaces[j].nwin; i++) {
+                if (spaces[j].wins[i].window == e->window) {
+                    mw = &spaces[j].wins[i];
+                    break;
+                }
+            }
+            if (mw) break;
+        }
+        if (!mw) return;
+
+        /* Handle fullscreen toggle */
+        if (prop1 == atom_net_wm_state_full ||
+            prop2 == atom_net_wm_state_full) {
+            int want_fs = 0;
+            if (action == 2)       /* TOGGLE */
+                want_fs = !mw->is_fullscreen;
+            else if (action == 1)  /* ADD */
+                want_fs = 1;
+            else if (action == 0)  /* REMOVE */
+                want_fs = 0;
+            else
+                return;
+
+            if (want_fs == mw->is_fullscreen)
+                return;
+
+            if (ws->focused != mw)
+                refocus(ws, mw);
+            toggle_fullscreen();
+            return;
+        }
+    }
+
+    /* _NET_ACTIVE_WINDOW: focus request */
+    if (e->message_type == atom_net_active_window) {
+        for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+            for (i = 0; i < spaces[j].nwin; i++) {
+                if (spaces[j].wins[i].window == e->window) {
+                    mw = &spaces[j].wins[i];
+                    break;
+                }
+            }
+            if (mw) break;
+        }
+        if (!mw) return;
+
+        if (mw->workspace != cur_ws && !mw->is_sticky)
+            switch_workspace((void *)(long)mw->workspace);
+        if (ws->focused != mw)
+            refocus(ws, mw);
+        return;
+    }
+
+    /* _NET_CLOSE_WINDOW */
+    if (e->message_type == atom_net_close) {
+        unmanage_window(e->window, 0);
+        return;
+    }
+}
+
 /* ---- close/quit ---- */
 
 void
@@ -615,22 +694,49 @@ toggle_fullscreen(void)
     }
 
     if (w->is_fullscreen) {
+        Monitor *mon = curmon();
         w->pre_fs_floating = w->is_floating;
-        w->is_floating = 1;
 
-        w->x = 0;
-        w->y = 0;
-        w->width = scrw;
-        w->height = scrh;
+        if (w->is_floating) {
+            w->pre_fs_x = w->x;
+            w->pre_fs_y = w->y;
+            w->pre_fs_w = w->width;
+            w->pre_fs_h = w->height;
+        }
+
+        w->is_floating = 1;
+        w->x = mon->x;
+        w->y = mon->y;
+        w->width = mon->width;
+        w->height = mon->height;
         XSetWindowBorderWidth(dpy, w->window, 0);
-        XMoveResizeWindow(dpy, w->window, 0, 0, scrw, scrh);
+        XMoveResizeWindow(dpy, w->window, mon->x, mon->y,
+                          mon->width, mon->height);
         XRaiseWindow(dpy, w->window);
 
-        XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
-                        PropModeReplace, (unsigned char *)&atom_net_wm_state_full, 1);
+        /* Build _NET_WM_STATE with fullscreen + existing flags */
+        {
+            Atom states[4];
+            int nstates = 0;
+            states[nstates++] = atom_net_wm_state_full;
+            if (w->is_above)    states[nstates++] = atom_net_wm_state_above;
+            if (w->is_sticky)   states[nstates++] = atom_net_wm_state_sticky;
+            if (w->is_not_focusable) states[nstates++] = atom_net_wm_state_not_focusable;
+            XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
+                            PropModeReplace, (unsigned char *)states, nstates);
+        }
     } else {
         w->is_floating = w->pre_fs_floating;
         XSetWindowBorderWidth(dpy, w->window, BORDER_WIDTH);
+
+        /* Restore floating geometry or let retile recompute for tiled */
+        if (w->pre_fs_floating) {
+            w->x = w->pre_fs_x;
+            w->y = w->pre_fs_y;
+            w->width = w->pre_fs_w;
+            w->height = w->pre_fs_h;
+            XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
+        }
 
         /* Rebuild _NET_WM_STATE, preserving above/sticky/not_focusable */
         {
@@ -639,8 +745,11 @@ toggle_fullscreen(void)
             if (w->is_above)    states[nstates++] = atom_net_wm_state_above;
             if (w->is_sticky)   states[nstates++] = atom_net_wm_state_sticky;
             if (w->is_not_focusable) states[nstates++] = atom_net_wm_state_not_focusable;
-            XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
-                            PropModeReplace, (unsigned char *)states, nstates);
+            if (nstates)
+                XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
+                                PropModeReplace, (unsigned char *)states, nstates);
+            else
+                XDeleteProperty(dpy, w->window, atom_net_wm_state);
         }
 
         retile_deferred();
@@ -1216,10 +1325,12 @@ handle_property_notify(XPropertyEvent *e)
     unsigned char *data = NULL;
     int was_above = mw->is_above;
     int was_sticky = mw->is_sticky;
+    int was_fullscreen = mw->is_fullscreen;
 
     mw->is_above = 0;
     mw->is_sticky = 0;
     mw->is_not_focusable = 0;
+    mw->is_fullscreen = 0;
 
     if (XGetWindowProperty(dpy, e->window, atom_net_wm_state, 0, 32, False,
                            XA_ATOM, &actual, &fmt, &n, &remain,
@@ -1228,7 +1339,9 @@ handle_property_notify(XPropertyEvent *e)
             Atom *states = (Atom *)data;
             unsigned long si;
             for (si = 0; si < n; si++) {
-                if (states[si] == atom_net_wm_state_above)
+                if (states[si] == atom_net_wm_state_full)
+                    mw->is_fullscreen = 1;
+                else if (states[si] == atom_net_wm_state_above)
                     mw->is_above = 1;
                 else if (states[si] == atom_net_wm_state_sticky)
                     mw->is_sticky = 1;
@@ -1258,6 +1371,15 @@ handle_property_notify(XPropertyEvent *e)
             if (j == mw->workspace) continue;
             XUnmapWindow(dpy, mw->window);
         }
+    }
+
+    /* Handle fullscreen state change from client */
+    if (mw->is_fullscreen != was_fullscreen) {
+        Workspace *ws = active_ws();
+        if (ws->focused != mw)
+            refocus(ws, mw);
+        toggle_fullscreen();
+        return;
     }
 
     if (mw->is_above != was_above || mw->is_sticky != was_sticky)

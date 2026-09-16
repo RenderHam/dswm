@@ -72,6 +72,7 @@ struct ManagedWindow {
     int monitor        : 3;
     /* cold fields: only on fullscreen toggle / save-restore */
     float saved_factor;
+    int pre_fs_x, pre_fs_y, pre_fs_w, pre_fs_h;
     int pre_float_idx;
 };
 
@@ -225,6 +226,8 @@ extern Atom atom_net_wm_type_menu;
 extern Atom atom_net_wm_state_above;
 extern Atom atom_net_wm_state_sticky;
 extern Atom atom_net_wm_state_not_focusable;
+extern Atom atom_net_wm_state_hidden;
+extern Atom atom_net_close;
 
 /* ---- globals (owned by layout.c) ---- */
 
@@ -302,6 +305,7 @@ void handle_button_press(XButtonEvent *e);
 void handle_button_release(XButtonEvent *e);
 void handle_motion_notify(XMotionEvent *e);
 void handle_property_notify(XPropertyEvent *e);
+void handle_client_message(XClientMessageEvent *e);
 
 /* ---- main.c prototypes ---- */
 

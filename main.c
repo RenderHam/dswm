@@ -55,6 +55,8 @@ Atom atom_net_wm_type_menu;
 Atom atom_net_wm_state_above;
 Atom atom_net_wm_state_sticky;
 Atom atom_net_wm_state_not_focusable;
+Atom atom_net_wm_state_hidden;
+Atom atom_net_close;
 
 /* ---- shell commands ---- */
 
@@ -155,6 +157,7 @@ setup_ewmh(void)
                     PropModeReplace, (unsigned char *)(Atom[]){
                         atom_net_wm_strut,
                         atom_net_wm_state,
+                        atom_net_wm_state_full,
                         atom_net_current_desktop,
                         atom_net_number_of_desktops,
                         atom_net_active_window,
@@ -168,7 +171,7 @@ setup_ewmh(void)
                         atom_net_wm_state_above,
                         atom_net_wm_state_sticky,
                         atom_net_wm_state_not_focusable,
-                    }, 15);
+                    }, 16);
 
     update_ewmh_current_desktop();
     XDeleteProperty(dpy, root, atom_net_active_window);
@@ -202,6 +205,8 @@ cache_atoms(void)
     atom_net_wm_state_above = XInternAtom(dpy, "_NET_WM_STATE_ABOVE", False);
     atom_net_wm_state_sticky = XInternAtom(dpy, "_NET_WM_STATE_STICKY", False);
     atom_net_wm_state_not_focusable = XInternAtom(dpy, "_NET_WM_STATE_NOT_FOCUSABLE", False);
+    atom_net_wm_state_hidden = XInternAtom(dpy, "_NET_WM_STATE_HIDDEN", False);
+    atom_net_close = XInternAtom(dpy, "_NET_CLOSE_WINDOW", False);
 }
 
 /* ---- key grabbing ---- */
@@ -404,6 +409,7 @@ run(void)
         case ConfigureRequest: handle_configure_request(&ev.xconfigurerequest); break;
         case EnterNotify:      handle_enter_notify(&ev.xcrossing); break;
         case PropertyNotify:   handle_property_notify(&ev.xproperty); break;
+        case ClientMessage:    handle_client_message(&ev.xclient); break;
         default: continue;
         }
         flush_retile();
