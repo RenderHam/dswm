@@ -477,17 +477,17 @@ fit_window(void)
 /* Raise all floating windows above tiled.  Called after every tiling pass
    to maintain correct stacking — tiled windows are moved via
    XMoveResizeWindow which can change stacking order. */
-static void
+void
 raise_above_windows(Workspace *ws)
 {
     int i;
     for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].is_above || ws->wins[i].is_sticky)
+        if (ws->wins[i].is_floating && !ws->wins[i].is_fullscreen &&
+            !ws->wins[i].is_above && !ws->wins[i].is_sticky)
             XRaiseWindow(dpy, ws->wins[i].window);
     }
     for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].is_floating && !ws->wins[i].is_fullscreen &&
-            !ws->wins[i].is_above && !ws->wins[i].is_sticky)
+        if (ws->wins[i].is_above || ws->wins[i].is_sticky)
             XRaiseWindow(dpy, ws->wins[i].window);
     }
 }

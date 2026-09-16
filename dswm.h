@@ -246,6 +246,7 @@ void tiled_remove(Workspace *ws, Window w);
 void rebuild_tiled(Workspace *ws);
 
 void update_camera_ws(Workspace *ws);
+void raise_above_windows(Workspace *ws);
 void tile_horizontal_ws(Workspace *ws);
 void tile_windows_ws(Workspace *ws);
 void retile_ws(Workspace *ws);

@@ -48,6 +48,8 @@ refocus_after_remove(Workspace *ws, int removed)
 {
     if (ws->nwin == 0) {
         ws->focused = NULL;
+        XDeleteProperty(dpy, root, atom_net_active_window);
+        XFlush(dpy);
         return;
     }
 
@@ -55,21 +57,27 @@ refocus_after_remove(Workspace *ws, int removed)
     int ni;
 
     if (fi == -1) {
-        /* Focused pointer was invalidated by memmove — find the window
-           that shifted into the removed slot, or fall back to the end. */
         ni = removed;
         if (ni >= ws->nwin) ni = ws->nwin - 1;
     } else if (fi > removed) {
-        /* Focused window shifted left by one due to memmove */
         ni = fi - 1;
     } else {
-        /* Focused window was not affected by the removal */
         ni = fi;
+    }
+
+    if (ws->wins[ni].is_not_focusable) {
+        ws->focused = NULL;
+        XDeleteProperty(dpy, root, atom_net_active_window);
+        XFlush(dpy);
+        return;
     }
 
     ws->focused = &ws->wins[ni];
     update_border(ws->focused->window, 1);
     XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
+    XChangeProperty(dpy, root, atom_net_active_window, XA_WINDOW, 32,
+                    PropModeReplace, (unsigned char *)&ws->focused->window, 1);
+    XFlush(dpy);
 }
 
 /* ---- focus ---- */
@@ -85,22 +93,24 @@ refocus(Workspace *ws, ManagedWindow *next)
     if (ws->focused && ws->focused != next)
         update_border(ws->focused->window, 0);
 
+    /* _NET_WM_STATE_NOT_FOCUSABLE windows don't receive focus;
+       leave ws->focused and _NET_ACTIVE_WINDOW unchanged. */
+    if (next && next->is_not_focusable) return;
+
     ws->focused = next;
     if (next) {
-        /* _NET_WM_STATE_NOT_FOCUSABLE windows don't receive focus */
-        if (next->is_not_focusable) {
-            update_border(next->window, 0);
-            return;
-        }
         update_border(next->window, 1);
         XSetInputFocus(dpy, next->window, RevertToPointerRoot, CurrentTime);
-        XRaiseWindow(dpy, next->window);
-        /* Update _NET_ACTIVE_WINDOW for pagers/taskbars */
+        if (next->is_floating || next->is_fullscreen)
+            XRaiseWindow(dpy, next->window);
+        else
+            raise_above_windows(ws);
         XChangeProperty(dpy, root, atom_net_active_window, XA_WINDOW, 32,
                         PropModeReplace, (unsigned char *)&next->window, 1);
     } else {
         XDeleteProperty(dpy, root, atom_net_active_window);
     }
+    XFlush(dpy);
 }
 
 void
@@ -108,6 +118,7 @@ focus_monitor(void *arg)
 {
     int mon_idx = (int)(long)arg;
     int old_ws;
+    Workspace *ws;
     if (mon_idx < 0 || mon_idx >= nmons) return;
 
     old_ws = cur_ws;
@@ -118,8 +129,15 @@ focus_monitor(void *arg)
     show_workspace(cur_ws, 1);
 
     retile_ws(curws());
-
     update_ewmh_current_desktop();
+
+    ws = curws();
+    if (ws->focused)
+        refocus(ws, ws->focused);
+    else {
+        XDeleteProperty(dpy, root, atom_net_active_window);
+        XFlush(dpy);
+    }
 }
 
 /* ---- scroll (camera) ---- */
@@ -219,6 +237,7 @@ void
 switch_workspace(void *arg)
 {
     int idx = (int)(long)arg;
+    Workspace *ws;
     if (idx < 0 || idx >= NUM_WORKSPACES) return;
     if (idx == cur_ws) return;
 
@@ -227,8 +246,15 @@ switch_workspace(void *arg)
     show_workspace(cur_ws, 1);
 
     retile_ws(curws());
-
     update_ewmh_current_desktop();
+
+    ws = curws();
+    if (ws->focused)
+        refocus(ws, ws->focused);
+    else {
+        XDeleteProperty(dpy, root, atom_net_active_window);
+        XFlush(dpy);
+    }
 }
 
 void
@@ -482,7 +508,7 @@ manage_window(Window w)
         layout_insert(ws, w);
     }
 
-    XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask | PropertyChangeMask);
+    XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask | PropertyChangeMask | ButtonPressMask);
     XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
 
     /* Position floating windows before mapping to avoid one-frame jump */
@@ -1269,35 +1295,38 @@ void
 handle_button_press(XButtonEvent *e)
 {
     Workspace *ws = active_ws();
+    ManagedWindow *mw = NULL;
     int i;
 
-    if (!(e->state & Mod4Mask)) return;
-
-    if (e->button == Button3) {
-        for (i = ws->nwin - 1; i >= 0; i--) {
-            ManagedWindow *mw = &ws->wins[i];
-            if (!mw->is_floating || mw->is_fullscreen) continue;
-            if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
-                && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-                if (ws->focused != mw) refocus(ws, mw);
-                grab_mouse(mw, 1, e);
-                return;
-            }
+    for (i = ws->nwin - 1; i >= 0; i--) {
+        if (ws->wins[i].window == e->window) {
+            mw = &ws->wins[i];
+            break;
         }
+    }
+
+    /* Mod+click: floating drag/resize */
+    if (e->state & Mod4Mask) {
+        if (!mw || !mw->is_floating || mw->is_fullscreen) return;
+        if (ws->focused != mw) refocus(ws, mw);
+        if (e->button == Button3)
+            grab_mouse(mw, 1, e);
+        else if (e->button == Button1)
+            grab_mouse(mw, 0, e);
         return;
     }
 
-    if (e->button != Button1) return;
+    /* Plain click */
+    if (!mw) return;
+    if (mw->is_not_focusable) return;
 
-    for (i = ws->nwin - 1; i >= 0; i--) {
-        ManagedWindow *mw = &ws->wins[i];
-        if (!mw->is_floating || mw->is_fullscreen) continue;
-        if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
-            && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-            if (ws->focused != mw) refocus(ws, mw);
-            grab_mouse(mw, 0, e);
-            return;
-        }
+    if (mw->is_floating && !mw->is_fullscreen) {
+        if (ws->focused != mw)
+            refocus(ws, mw);
+        else
+            XRaiseWindow(dpy, mw->window);
+    } else {
+        if (ws->focused != mw) refocus(ws, mw);
     }
 }
 
