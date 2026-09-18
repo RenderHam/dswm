@@ -408,6 +408,7 @@ resize_master(void *arg)
     if (mon->master_factor > MAX_MASTER_VERT) mon->master_factor = MAX_MASTER_VERT;
 
     tile_windows_ws(ws);
+    raise_above_windows(ws);
 }
 
 void
@@ -425,6 +426,7 @@ resize_window(void *arg)
     if (!mon->horizontal_mode && ws->dwindle_root) {
         dwindle_resize(ws, dir, RESIZE_STEP);
         dwindle_arrange(ws, mon);
+        raise_above_windows(ws);
         return;
     }
 
@@ -437,6 +439,7 @@ resize_window(void *arg)
         tile_horizontal_ws(ws);
     else
         tile_windows_ws(ws);
+    raise_above_windows(ws);
 }
 
 /* Returns 1 if the caller should toggle fullscreen (window was floating
@@ -477,7 +480,7 @@ fit_window(void)
 /* Raise all floating windows above tiled.  Called after every tiling pass
    to maintain correct stacking — tiled windows are moved via
    XMoveResizeWindow which can change stacking order. */
-static void
+void
 raise_above_windows(Workspace *ws)
 {
     int i;
@@ -551,6 +554,7 @@ toggle_layout(void)
             layout_insert(ws, ws->tiled[i]->window);
         dwindle_arrange(ws, mon);
     }
+    raise_above_windows(ws);
 }
 
 /* ---- dwindle tree ---- */
@@ -863,6 +867,7 @@ dwindle_focus_prevnext(Workspace *ws, int delta)
     ws->dwindle_focus = leaves[idx];
     ManagedWindow *mw = dwindle_find_mw(ws, leaves[idx]->win);
     if (mw) refocus(ws, mw);
+    raise_above_windows(ws);
 }
 
 /* Find the fence ancestor perpendicular to resize direction. */

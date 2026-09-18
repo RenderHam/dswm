@@ -94,7 +94,8 @@ refocus(Workspace *ws, ManagedWindow *next)
         }
         update_border(next->window, 1);
         XSetInputFocus(dpy, next->window, RevertToPointerRoot, CurrentTime);
-        XRaiseWindow(dpy, next->window);
+        if (next->is_floating || next->is_fullscreen)
+            XRaiseWindow(dpy, next->window);
         /* Update _NET_ACTIVE_WINDOW for pagers/taskbars */
         XChangeProperty(dpy, root, atom_net_active_window, XA_WINDOW, 32,
                         PropModeReplace, (unsigned char *)&next->window, 1);
@@ -150,6 +151,7 @@ move_horizontal(int forward)
         if (idx - 1 < 0) return;
         refocus(ws, ws->tiled[idx - 1]);
     }
+    raise_above_windows(ws);
 
     update_camera_ws(curws());
 }
@@ -596,6 +598,7 @@ focus_cycle(int delta)
     if (visited >= ws->ntiled) return;
 
     refocus(ws, ws->tiled[new_idx]);
+    raise_above_windows(ws);
 
     if (mon->horizontal_mode)
         update_camera_ws(curws());
@@ -1179,10 +1182,16 @@ handle_configure_request(XConfigureRequestEvent *e)
     }
 
     if (mw && !mw->is_floating && !mw->is_fullscreen) {
-        XWindowChanges wc;
-        wc.sibling = e->above;
-        wc.stack_mode = e->detail;
-        XConfigureWindow(dpy, e->window, CWSibling | CWStackMode, &wc);
+        int mask = e->value_mask & ~(CWSibling | CWStackMode);
+        if (mask) {
+            XWindowChanges wc;
+            wc.x = e->x;
+            wc.y = e->y;
+            wc.width = e->width;
+            wc.height = e->height;
+            wc.border_width = e->border_width;
+            XConfigureWindow(dpy, e->window, mask, &wc);
+        }
         return;
     }
 
@@ -1217,6 +1226,7 @@ handle_enter_notify(XCrossingEvent *e)
         if (ws->wins[i].window == e->window) {
             if (ws->wins[i].is_not_focusable) break;
             refocus(ws, &ws->wins[i]);
+            raise_above_windows(ws);
             {
                 Monitor *mon = curmon();
                 if (!mon->horizontal_mode && ws->dwindle_root)
