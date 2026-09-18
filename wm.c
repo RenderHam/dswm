@@ -1235,7 +1235,6 @@ handle_enter_notify(XCrossingEvent *e)
         if (ws->wins[i].window == e->window) {
             if (ws->wins[i].is_not_focusable) break;
             refocus(ws, &ws->wins[i]);
-            raise_above_windows(ws);
             {
                 Monitor *mon = curmon();
                 if (!mon->horizontal_mode && ws->dwindle_root)
