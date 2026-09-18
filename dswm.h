@@ -35,6 +35,7 @@
 
 #define INITIAL_CAP        16
 #define MIN_WIN_DIM        10
+#define NELEM(x)           (sizeof(x) / sizeof(x[0]))
 #define MIN_MASTER_VERT    0.1f
 #define MAX_MASTER_VERT    0.9f
 #define DWINDLE_SPLIT_RATIO    0.5f
@@ -46,7 +47,6 @@
 #define MAX_TREE_STACK     64
 #define MAX_LEAVES         128
 #define MAX_MONS           8
-#define RESIZE_HANDLE_PX   16
 
 #define MODKEY             Mod4Mask
 #define SHTKEY             ShiftMask

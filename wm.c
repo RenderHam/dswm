@@ -12,8 +12,6 @@
 #include <err.h>
 #include <limits.h>
 
-#define NELEM(x)  (sizeof(x) / sizeof(x[0]))
-
 /* ---- workspace window list helpers ---- */
 
 static int
@@ -68,6 +66,10 @@ refocus_after_remove(Workspace *ws, int removed)
     }
 
     ws->focused = &ws->wins[ni];
+    if (ws->focused->is_not_focusable) {
+        update_border(ws->focused->window, 0);
+        return;
+    }
     update_border(ws->focused->window, 1);
     XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
 }
@@ -158,31 +160,38 @@ move_horizontal(int forward)
 
 /* ---- swap ---- */
 
-/* Swap the focused window with its neighbour in the workspace window list.
-   A struct copy (tmp) is needed because the two wins[] entries overlap
-   in memory and an in-place swap would corrupt data. */
+/* Swap the focused tiled window with its neighbour in the tiled list.
+   Only operates on tiled windows — floating neighbours are skipped. */
 void
 swap_impl(int delta)
 {
     Workspace *ws = active_ws();
     ManagedWindow tmp;
-    int cur_idx, swap_idx;
+    int ti, si, wi, wj;
 
-    if (ws->nwin < 2 || !ws->focused) return;
+    if (ws->ntiled < 2 || !ws->focused) return;
+    if (ws->focused->is_floating) return;
 
-    cur_idx = ws->focused - ws->wins;
-    if (ws->wins[cur_idx].is_floating) return;
+    /* Find focused window in tiled[] */
+    for (ti = 0; ti < ws->ntiled; ti++)
+        if (ws->tiled[ti] == ws->focused)
+            break;
+    if (ti == ws->ntiled) return;
 
-    swap_idx = cur_idx + delta;
-    if (swap_idx < 0 || swap_idx >= ws->nwin) return;
+    si = ti + delta;
+    if (si < 0 || si >= ws->ntiled) return;
 
-    tmp = ws->wins[cur_idx];
-    ws->wins[cur_idx] = ws->wins[swap_idx];
-    ws->wins[swap_idx] = tmp;
+    /* Swap in wins[] to reorder the master list */
+    wi = ws->tiled[ti] - ws->wins;
+    wj = ws->tiled[si] - ws->wins;
+
+    tmp = ws->wins[wi];
+    ws->wins[wi] = ws->wins[wj];
+    ws->wins[wj] = tmp;
 
     retile_deferred();
 
-    ws->focused = &ws->wins[swap_idx];
+    ws->focused = &ws->wins[wj];
     refocus(ws, ws->focused);
 }
 
@@ -1201,9 +1210,9 @@ handle_configure_request(XConfigureRequestEvent *e)
     wc.width = e->width;
     wc.height = e->height;
     wc.border_width = e->border_width;
-    wc.sibling = e->above;
-    wc.stack_mode = e->detail;
-    XConfigureWindow(dpy, e->window, e->value_mask, &wc);
+    int mask = e->value_mask & ~(CWSibling | CWStackMode);
+    if (mask)
+        XConfigureWindow(dpy, e->window, mask, &wc);
 
     /* Sync managed state after proxying floating configure */
     if (mw) {
@@ -1444,9 +1453,9 @@ handle_property_notify(XPropertyEvent *e)
 
     /* Handle fullscreen state change from client */
     if (mw->is_fullscreen != was_fullscreen) {
-        Workspace *ws = active_ws();
-        if (ws->focused != mw)
-            refocus(ws, mw);
+        Workspace *aws = active_ws();
+        if (aws->focused != mw)
+            refocus(aws, mw);
         toggle_fullscreen();
         return;
     }

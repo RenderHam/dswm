@@ -11,7 +11,6 @@
 #include <err.h>
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
-#define NELEM(x)  (sizeof(x) / sizeof(x[0]))
 
 /* globals owned by this file */
 int retile_pending = 0;
@@ -477,20 +476,20 @@ fit_window(void)
    collapse into a single retile.  retile_deferred() sets a flag;
    flush_retile() (called once per event) performs the actual layout. */
 
-/* Raise all floating windows above tiled.  Called after every tiling pass
-   to maintain correct stacking — tiled windows are moved via
-   XMoveResizeWindow which can change stacking order. */
+/* Raise all floating windows above tiled.  Also called from focus paths
+   and resize/move handlers to keep floating above tiled at all times.
+   Order: regular floating first, then above/sticky on top. */
 void
 raise_above_windows(Workspace *ws)
 {
     int i;
     for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].is_above || ws->wins[i].is_sticky)
+        if (ws->wins[i].is_floating && !ws->wins[i].is_fullscreen &&
+            !ws->wins[i].is_above && !ws->wins[i].is_sticky)
             XRaiseWindow(dpy, ws->wins[i].window);
     }
     for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].is_floating && !ws->wins[i].is_fullscreen &&
-            !ws->wins[i].is_above && !ws->wins[i].is_sticky)
+        if (ws->wins[i].is_above || ws->wins[i].is_sticky)
             XRaiseWindow(dpy, ws->wins[i].window);
     }
 }

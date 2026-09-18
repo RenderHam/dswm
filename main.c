@@ -12,8 +12,6 @@
 #include <signal.h>
 #include <err.h>
 
-#define NELEM(x)  (sizeof(x) / sizeof(x[0]))
-
 #define WS(n)                                                          \
         { MODKEY,         XK_##n, SWITCH_WORKSPACE,  { .i = n-1 } },   \
         { MODKEY|SHTKEY,  XK_##n, MOVE_TO_WORKSPACE, { .i = n-1 } }
