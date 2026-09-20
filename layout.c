@@ -194,14 +194,6 @@ compute_usable_area(Monitor *mon, int *usable_w, int *usable_h,
    A virtual camera (cam_x) scrolls the strip left/right so that the
    focused column is visible — either centered or edge-snapped. */
 
-static int
-compute_usable_w(Monitor *mon)
-{
-    int usable_w = mon->width - mon->strut_left - mon->strut_right;
-    if (usable_w < MIN_WIN_DIM) usable_w = mon->width;
-    return usable_w;
-}
-
 void
 update_camera_ws(Workspace *ws)
 {
@@ -211,7 +203,8 @@ update_camera_ws(Workspace *ws)
 
     if (ws->ntiled == 0) return;
 
-    usable_w = compute_usable_w(mon);
+    usable_w = mon->width - mon->strut_left - mon->strut_right;
+    if (usable_w < MIN_WIN_DIM) usable_w = mon->width;
 
     int x_start = ws->tiled[0]->x - GAP_OUTER;
     int last = ws->ntiled - 1;
@@ -407,7 +400,6 @@ resize_master(void *arg)
     if (mon->master_factor > MAX_MASTER_VERT) mon->master_factor = MAX_MASTER_VERT;
 
     tile_windows_ws(ws);
-    raise_above_windows(ws);
 }
 
 void
@@ -425,7 +417,6 @@ resize_window(void *arg)
     if (!mon->horizontal_mode && ws->dwindle_root) {
         dwindle_resize(ws, dir, RESIZE_STEP);
         dwindle_arrange(ws, mon);
-        raise_above_windows(ws);
         return;
     }
 
@@ -438,7 +429,6 @@ resize_window(void *arg)
         tile_horizontal_ws(ws);
     else
         tile_windows_ws(ws);
-    raise_above_windows(ws);
 }
 
 /* Returns 1 if the caller should toggle fullscreen (window was floating
@@ -866,7 +856,6 @@ dwindle_focus_prevnext(Workspace *ws, int delta)
     ws->dwindle_focus = leaves[idx];
     ManagedWindow *mw = dwindle_find_mw(ws, leaves[idx]->win);
     if (mw) refocus(ws, mw);
-    raise_above_windows(ws);
 }
 
 /* Find the fence ancestor perpendicular to resize direction. */

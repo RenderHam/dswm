@@ -12,6 +12,16 @@
 #include <err.h>
 #include <limits.h>
 
+/* ---- safety helpers ---- */
+
+/* Check if a window still exists on the server.  Avoids BadWindow crashes. */
+static int
+window_exists(Window w)
+{
+    XWindowAttributes wa;
+    return XGetWindowAttributes(dpy, w, &wa);
+}
+
 /* ---- workspace window list helpers ---- */
 
 static int
@@ -71,7 +81,8 @@ refocus_after_remove(Workspace *ws, int removed)
         return;
     }
     update_border(ws->focused->window, 1);
-    XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
+    if (window_exists(ws->focused->window))
+        XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
 }
 
 /* ---- focus ---- */
@@ -95,7 +106,21 @@ refocus(Workspace *ws, ManagedWindow *next)
             return;
         }
         update_border(next->window, 1);
-        XSetInputFocus(dpy, next->window, RevertToPointerRoot, CurrentTime);
+        if (window_exists(next->window)) {
+            if (next->input_hint)
+                XSetInputFocus(dpy, next->window, RevertToPointerRoot, CurrentTime);
+            else {
+                /* Window doesn't want input focus — send WM_TAKE_FOCUS instead */
+                XEvent ev = {0};
+                ev.xclient.type = ClientMessage;
+                ev.xclient.window = next->window;
+                ev.xclient.message_type = atom_wm_protocols;
+                ev.xclient.format = 32;
+                ev.xclient.data.l[0] = atom_wm_take_focus;
+                ev.xclient.data.l[1] = CurrentTime;
+                XSendEvent(dpy, next->window, False, NoEventMask, &ev);
+            }
+        }
         if (next->is_floating || next->is_fullscreen)
             XRaiseWindow(dpy, next->window);
         /* Update _NET_ACTIVE_WINDOW for pagers/taskbars */
@@ -153,7 +178,6 @@ move_horizontal(int forward)
         if (idx - 1 < 0) return;
         refocus(ws, ws->tiled[idx - 1]);
     }
-    raise_above_windows(ws);
 
     update_camera_ws(curws());
 }
@@ -474,6 +498,17 @@ manage_window(Window w)
     apply_rules(&mw, w);
     read_net_wm_state(&mw, w);
 
+    /* Read ICCCM WM_HINTS — default input_hint to 1 (accept focus) */
+    mw.input_hint = 1;
+    {
+        XWMHints *hints = XGetWMHints(dpy, w);
+        if (hints) {
+            if (hints->flags & InputHint)
+                mw.input_hint = hints->input;
+            XFree(hints);
+        }
+    }
+
     /* Center floating windows on current monitor */
     if (mw.is_floating && !mw.is_fullscreen) {
         Monitor *mon = curmon();
@@ -607,7 +642,6 @@ focus_cycle(int delta)
     if (visited >= ws->ntiled) return;
 
     refocus(ws, ws->tiled[new_idx]);
-    raise_above_windows(ws);
 
     if (mon->horizontal_mode)
         update_camera_ws(curws());
@@ -1191,6 +1225,8 @@ handle_configure_request(XConfigureRequestEvent *e)
     }
 
     if (mw && !mw->is_floating && !mw->is_fullscreen) {
+        /* Tiled: honor geometry changes but block stacking.
+           Send synthetic ConfigureNotify so client knows its real geometry. */
         int mask = e->value_mask & ~(CWSibling | CWStackMode);
         if (mask) {
             XWindowChanges wc;
@@ -1201,18 +1237,33 @@ handle_configure_request(XConfigureRequestEvent *e)
             wc.border_width = e->border_width;
             XConfigureWindow(dpy, e->window, mask, &wc);
         }
+
+        XConfigureEvent ce;
+        memset(&ce, 0, sizeof(ce));
+        ce.type = ConfigureNotify;
+        ce.event = e->window;
+        ce.window = e->window;
+        ce.above = None;
+        ce.x = mw->x;
+        ce.y = mw->y;
+        ce.width = mw->width;
+        ce.height = mw->height;
+        ce.border_width = BORDER_WIDTH;
+        ce.override_redirect = False;
+        XSendEvent(dpy, e->window, False, StructureNotifyMask, (XEvent *)&ce);
         return;
     }
 
+    /* Floating/unmanaged: honor all fields including stacking */
     XWindowChanges wc;
     wc.x = e->x;
     wc.y = e->y;
     wc.width = e->width;
     wc.height = e->height;
     wc.border_width = e->border_width;
-    int mask = e->value_mask & ~(CWSibling | CWStackMode);
-    if (mask)
-        XConfigureWindow(dpy, e->window, mask, &wc);
+    wc.sibling = e->above;
+    wc.stack_mode = e->detail;
+    XConfigureWindow(dpy, e->window, e->value_mask, &wc);
 
     /* Sync managed state after proxying floating configure */
     if (mw) {
@@ -1242,6 +1293,25 @@ handle_enter_notify(XCrossingEvent *e)
             }
             break;
         }
+    }
+}
+
+/* Re-focus the tracked window if focus drifts to root or an unmanaged window.
+   Prevents focus stealing and handles clients that expect the WM to maintain
+   focus on the active window. */
+void
+handle_focus_in(XFocusInEvent *e)
+{
+    Workspace *ws = active_ws();
+
+    if (e->detail == NotifyInferior || e->detail == NotifyPointer
+        || e->detail == NotifyPointerRoot)
+        return;
+
+    /* If focus went to root, re-focus the active window */
+    if (e->window == root) {
+        if (ws->focused && ws->focused->window != root)
+            refocus(ws, ws->focused);
     }
 }
 
@@ -1333,7 +1403,6 @@ handle_button_release(XButtonEvent *e)
 void
 handle_motion_notify(XMotionEvent *e)
 {
-    Monitor *mon = curmon();
     int dx, dy;
 
     if (!mouse.active || !mouse.win) return;
@@ -1351,10 +1420,8 @@ handle_motion_notify(XMotionEvent *e)
         }
         int nw = mouse.orig_w + dx;
         int nh = mouse.orig_h + dy;
-        nw = nw < MIN_WIN_DIM ? MIN_WIN_DIM : nw;
-        nh = nh < MIN_WIN_DIM ? MIN_WIN_DIM : nh;
-        if (nw > mon->width - 2 * BORDER_WIDTH)  nw = mon->width  - 2 * BORDER_WIDTH;
-        if (nh > mon->height - 2 * BORDER_WIDTH) nh = mon->height - 2 * BORDER_WIDTH;
+        if (nw < MIN_WIN_DIM) nw = MIN_WIN_DIM;
+        if (nh < MIN_WIN_DIM) nh = MIN_WIN_DIM;
         mouse.win->width = nw;
         mouse.win->height = nh;
         XMoveResizeWindow(dpy, mouse.win->window,
@@ -1364,12 +1431,6 @@ handle_motion_notify(XMotionEvent *e)
 
     mouse.win->x = mouse.orig_x + dx;
     mouse.win->y = mouse.orig_y + dy;
-    if (mouse.win->x < mon->x) mouse.win->x = mon->x;
-    if (mouse.win->y < mon->y) mouse.win->y = mon->y;
-    if (mouse.win->x + mouse.win->width + 2 * BORDER_WIDTH > mon->x + mon->width)
-        mouse.win->x = mon->x + mon->width - mouse.win->width - 2 * BORDER_WIDTH;
-    if (mouse.win->y + mouse.win->height + 2 * BORDER_WIDTH > mon->y + mon->height)
-        mouse.win->y = mon->y + mon->height - mouse.win->height - 2 * BORDER_WIDTH;
     XMoveResizeWindow(dpy, mouse.win->window,
                       mouse.win->x, mouse.win->y,
                       mouse.win->width, mouse.win->height);

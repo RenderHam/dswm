@@ -33,6 +33,7 @@ ManagedWindow *scratch_saved_focus;
 /* cached atoms */
 Atom atom_wm_delete;
 Atom atom_wm_protocols;
+Atom atom_wm_take_focus;
 Atom atom_net_wm_strut;
 Atom atom_net_wm_state;
 Atom atom_net_wm_state_full;
@@ -183,6 +184,7 @@ cache_atoms(void)
 {
     atom_wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     atom_wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
+    atom_wm_take_focus = XInternAtom(dpy, "WM_TAKE_FOCUS", False);
     atom_net_wm_strut = XInternAtom(dpy, "_NET_WM_STRUT", False);
     atom_net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
     atom_net_wm_state_full = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
@@ -406,6 +408,7 @@ run(void)
         case UnmapNotify:      handle_unmap_notify(&ev.xunmap); break;
         case ConfigureRequest: handle_configure_request(&ev.xconfigurerequest); break;
         case EnterNotify:      handle_enter_notify(&ev.xcrossing); break;
+        case FocusIn:          handle_focus_in(&ev.xfocus); break;
         case PropertyNotify:   handle_property_notify(&ev.xproperty); break;
         case ClientMessage:    handle_client_message(&ev.xclient); break;
         default: continue;

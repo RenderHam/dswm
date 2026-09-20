@@ -68,6 +68,7 @@ struct ManagedWindow {
     int is_above       : 1;  /* _NET_WM_STATE_ABOVE — always raised */
     int is_sticky      : 1;  /* _NET_WM_STATE_STICKY — visible all workspaces */
     int is_not_focusable : 1; /* _NET_WM_STATE_NOT_FOCUSABLE */
+    int input_hint        : 1; /* ICCCM WM_HINTS input field */
     int workspace      : 4;
     int monitor        : 3;
     /* cold fields: only on fullscreen toggle / save-restore */
@@ -206,6 +207,7 @@ extern ManagedWindow *scratch_saved_focus;
 /* cached atoms (owned by main.c) */
 extern Atom atom_wm_delete;
 extern Atom atom_wm_protocols;
+extern Atom atom_wm_take_focus;
 extern Atom atom_net_wm_strut;
 extern Atom atom_net_wm_state;
 extern Atom atom_net_wm_state_full;
@@ -301,6 +303,7 @@ void handle_destroy_notify(XDestroyWindowEvent *e);
 void handle_unmap_notify(XUnmapEvent *e);
 void handle_configure_request(XConfigureRequestEvent *e);
 void handle_enter_notify(XCrossingEvent *e);
+void handle_focus_in(XFocusInEvent *e);
 void handle_key_press(XKeyEvent *e);
 void handle_button_press(XButtonEvent *e);
 void handle_button_release(XButtonEvent *e);
