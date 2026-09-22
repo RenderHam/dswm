@@ -32,12 +32,14 @@
 
 ## Phase B — focus / stacking
 
-- [ ] B1. Keyboard focus can't reach floating windows (`focus_cycle` is tiled-only).
-- [ ] B2. Raise-on-hover for floating stays in `refocus`; restrict raise to
+- [x] B1. Keyboard focus can't reach floating windows (`focus_cycle` is tiled-only).
+- [x] B2. Raise-on-hover for floating stays in `refocus`; restrict raise to
   explicit focus (key/click/drag), not hover-enter.
-  DECISION NEEDED: keep hover-raise vs explicit-focus-only raise.
-- [ ] B3. `handle_configure_request` only searches `active_ws`; search all workspaces.
-- [ ] B4. Add `MappingNotify` handler → `grab_keys()` (layout changes break grabs).
+  DECIDED: explicit-focus-only. `refocus` no longer raises; explicit raise
+  added to focus_cycle, dwindle_focus_cycle, Mod4+click/drag, _NET_ACTIVE_WINDOW,
+  manage (born-fullscreen). `window_exists` exported for layout.c.
+- [x] B3. `handle_configure_request` only searches `active_ws`; search all workspaces.
+- [x] B4. Add `MappingNotify` handler → `grab_keys()` (layout changes break grabs).
 
 ## Phase C — spec parity (pick subset)
 
@@ -60,3 +62,5 @@
 
 - 2026-09-23: Plan written. Starting Phase A.
 - 2026-09-23: Phase A done. Zero warnings. Not committed per user request.
+- 2026-09-23: Phase B partial (B1/B3/B4) done. Zero warnings. B2 pending user decision.
+- 2026-09-23: Phase B complete (B2 explicit-focus raise). Zero warnings. Not committed per user request.

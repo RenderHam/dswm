@@ -410,6 +410,7 @@ run(void)
         case ConfigureRequest: handle_configure_request(&ev.xconfigurerequest); break;
         case EnterNotify:      handle_enter_notify(&ev.xcrossing); break;
         case FocusIn:          handle_focus_in(&ev.xfocus); break;
+        case MappingNotify:    handle_mapping_notify(&ev.xmapping); break;
         case PropertyNotify:   handle_property_notify(&ev.xproperty); break;
         case ClientMessage:    handle_client_message(&ev.xclient); break;
         default: continue;

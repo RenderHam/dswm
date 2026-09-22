@@ -15,7 +15,7 @@
 /* ---- safety helpers ---- */
 
 /* Check if a window still exists on the server.  Avoids BadWindow crashes. */
-static int
+int
 window_exists(Window w)
 {
     XWindowAttributes wa;
@@ -68,6 +68,14 @@ ManagedWindow *
 focused_mw(Workspace *ws)
 {
     return find_mw(ws, ws->focused);
+}
+
+/* Whether a window can receive keyboard-cycle focus.  Fullscreen and
+   monocle-hidden windows are skipped (they're not visible/interactive). */
+int
+focus_candidate(ManagedWindow *mw)
+{
+    return !mw->is_not_focusable && !mw->is_fullscreen && !mw->monocle_hidden;
 }
 
 /* Refocus the workspace after a window at 'removed' index was memmoved out.
@@ -123,6 +131,8 @@ refocus(Workspace *ws, ManagedWindow *next)
             return;
         }
         update_border(next->window, 1);
+        /* No raise here: stacking changes only on explicit focus
+           (keyboard cycle, click, drag, manage) — never on hover. */
         if (window_exists(next->window)) {
             if (next->input_hint)
                 XSetInputFocus(dpy, next->window, RevertToPointerRoot, CurrentTime);
@@ -138,8 +148,6 @@ refocus(Workspace *ws, ManagedWindow *next)
                 XSendEvent(dpy, next->window, False, NoEventMask, &ev);
             }
         }
-        if (next->is_floating || next->is_fullscreen)
-            XRaiseWindow(dpy, next->window);
         /* Update _NET_ACTIVE_WINDOW for pagers/taskbars */
         XChangeProperty(dpy, root, atom_net_active_window, XA_WINDOW, 32,
                         PropModeReplace, (unsigned char *)&next->window, 1);
@@ -565,6 +573,11 @@ manage_window(Window w)
 
     refocus(ws, &ws->wins[insert_idx]);
 
+    /* Spawning is explicit: keep a born-fullscreen window on top
+       (floating is already raised above and ordered by retile) */
+    if (mw.is_fullscreen)
+        XRaiseWindow(dpy, w);
+
     if (mw.workspace == cur_ws || ws == &spaces[SCRATCHPAD_IDX]) {
         Atom actual;
         int fmt;
@@ -628,46 +641,46 @@ unmanage_window(Window w, int force)
 
 /* ---- focus cycling ---- */
 
-/* Move focus to the next/previous tiled window.  Both iterate the tiled[]
-   pointer array to find the current index, then shift by ±1.  In
-   horizontal mode the camera is updated to keep the focused column visible. */
+/* Move focus to the next/previous window in wins[] order, wrapping at
+   edges.  Tiled and floating windows are both cycled (floating was
+   previously keyboard-unreachable).  In horizontal mode the camera is
+   updated to keep the focused column visible. */
 void
 focus_cycle(int delta)
 {
     Workspace *ws = active_ws();
     Monitor *mon = curmon();
-    int idx = -1, i;
+    int idx = -1, i, steps;
 
-    /* In dwindle mode, use tree-based focus */
+    /* In dwindle mode, cycle in tree-visual order (see layout.c) */
     if (!mon->horizontal_mode && ws->dwindle_root) {
-        dwindle_focus_prevnext(ws, delta);
+        dwindle_focus_cycle(ws, delta);
         return;
     }
 
-    if (ws->ntiled == 0) return;
-
-    for (i = 0; i < ws->ntiled; i++) {
-        if (ws->tiled[i]->window == ws->focused) {
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].window == ws->focused) {
             idx = i;
             break;
         }
     }
-    if (idx == -1) return;
 
-    /* Walk in the given direction, skipping not-focusable, wrapping at edges */
-    int new_idx = idx + delta;
-    int visited = 0;
-    while (visited < ws->ntiled) {
-        if (new_idx < 0) new_idx = ws->ntiled - 1;
-        else if (new_idx >= ws->ntiled) new_idx = 0;
-        if (!ws->tiled[new_idx]->is_not_focusable)
+    /* Walk in the given direction, skipping non-candidates */
+    i = idx;
+    for (steps = 0; steps < ws->nwin; steps++) {
+        i += delta;
+        if (i < 0) i = ws->nwin - 1;
+        else if (i >= ws->nwin) i = 0;
+        if (focus_candidate(&ws->wins[i]))
             break;
-        new_idx += delta;
-        visited++;
     }
-    if (visited >= ws->ntiled) return;
+    if (steps >= ws->nwin || ws->nwin == 0) return;
 
-    refocus(ws, ws->tiled[new_idx]);
+    refocus(ws, &ws->wins[i]);
+    /* Keyboard focus is explicit: raise floating/fullscreen targets */
+    if ((ws->wins[i].is_floating || ws->wins[i].is_fullscreen)
+        && window_exists(ws->wins[i].window))
+        XRaiseWindow(dpy, ws->wins[i].window);
 
     if (mon->horizontal_mode)
         update_camera_ws(curws());
@@ -740,6 +753,9 @@ handle_client_message(XClientMessageEvent *e)
             switch_workspace((void *)(long)mw->workspace);
         if (ws->focused != mw->window)
             refocus(ws, mw);
+        /* Pager/taskbar focus requests are explicit: raise floaters */
+        if ((mw->is_floating || mw->is_fullscreen) && window_exists(mw->window))
+            XRaiseWindow(dpy, mw->window);
         return;
     }
 
@@ -1245,16 +1261,7 @@ handle_unmap_notify(XUnmapEvent *e)
 void
 handle_configure_request(XConfigureRequestEvent *e)
 {
-    Workspace *ws = active_ws();
-    ManagedWindow *mw = NULL;
-    int i;
-
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].window == e->window) {
-            mw = &ws->wins[i];
-            break;
-        }
-    }
+    ManagedWindow *mw = find_mw_any(e->window);
 
     if (mw && !mw->is_floating && !mw->is_fullscreen) {
         /* Tiled: honor geometry changes but block stacking.
@@ -1353,6 +1360,15 @@ handle_focus_in(XFocusInEvent *e)
     }
 }
 
+/* Keyboard mapping changed (layout added/removed) — re-grab keys and
+   buttons so bindings keep working without a restart. */
+void
+handle_mapping_notify(XMappingEvent *e)
+{
+    (void)e;
+    grab_keys();
+}
+
 void
 handle_key_press(XKeyEvent *e)
 {
@@ -1406,6 +1422,7 @@ handle_button_press(XButtonEvent *e)
             if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
                 && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
                 if (ws->focused != mw->window) refocus(ws, mw);
+                XRaiseWindow(dpy, mw->window);
                 grab_mouse(mw, 1, e);
                 return;
             }
@@ -1421,6 +1438,7 @@ handle_button_press(XButtonEvent *e)
         if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
             && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
             if (ws->focused != mw->window) refocus(ws, mw);
+            XRaiseWindow(dpy, mw->window);
             grab_mouse(mw, 0, e);
             return;
         }

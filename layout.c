@@ -855,32 +855,51 @@ dwindle_cleanup(Workspace *ws)
     ws->dwindle_focus = NULL;
 }
 
-/* Focus next/prev leaf via in-order traversal. */
+/* Cycle focus in dwindle mode: tree leaves in visual (in-order) sequence,
+   then floating windows in wins[] order.  Wraps at the ends. */
 void
-dwindle_focus_prevnext(Workspace *ws, int delta)
+dwindle_focus_cycle(Workspace *ws, int delta)
 {
-    if (!ws->dwindle_root || !ws->dwindle_focus) return;
-
     DwindleNode *leaves[MAX_LEAVES];
+    ManagedWindow *cands[MAX_LEAVES];
     int nleaves = dwindle_collect_leaves(ws, leaves, MAX_LEAVES);
+    int n = 0, i, ci = -1;
 
-    if (nleaves == 0) return;
+    if (!ws->dwindle_root) return;
 
-    int idx = 0;
-    for (int i = 0; i < nleaves; i++) {
-        if (leaves[i] == ws->dwindle_focus) {
-            idx = i;
-            break;
+    for (i = 0; i < nleaves && n < MAX_LEAVES; i++) {
+        ManagedWindow *mw = dwindle_find_mw(ws, leaves[i]->win);
+        if (mw && focus_candidate(mw)) {
+            if (mw->window == ws->focused) ci = n;
+            cands[n++] = mw;
         }
     }
+    for (i = 0; i < ws->nwin && n < MAX_LEAVES; i++) {
+        ManagedWindow *mw = &ws->wins[i];
+        if (!mw->is_floating || !focus_candidate(mw)) continue;
+        if (mw->window == ws->focused) ci = n;
+        cands[n++] = mw;
+    }
+    if (n == 0) return;
 
-    idx += delta;
-    if (idx < 0) idx = nleaves - 1;
-    if (idx >= nleaves) idx = 0;
+    if (ci == -1)
+        ci = delta > 0 ? 0 : n - 1;
+    else {
+        ci += delta;
+        if (ci < 0) ci = n - 1;
+        else if (ci >= n) ci = 0;
+    }
 
-    ws->dwindle_focus = leaves[idx];
-    ManagedWindow *mw = dwindle_find_mw(ws, leaves[idx]->win);
-    if (mw) refocus(ws, mw);
+    /* Keep tree focus in sync when landing on a tiled leaf */
+    {
+        DwindleNode *leaf = dwindle_find_leaf(ws->dwindle_root, cands[ci]->window);
+        if (leaf) ws->dwindle_focus = leaf;
+    }
+    refocus(ws, cands[ci]);
+    /* Keyboard focus is explicit: raise floating/fullscreen targets */
+    if ((cands[ci]->is_floating || cands[ci]->is_fullscreen)
+        && window_exists(cands[ci]->window))
+        XRaiseWindow(dpy, cands[ci]->window);
 }
 
 /* Find the fence ancestor perpendicular to resize direction. */
