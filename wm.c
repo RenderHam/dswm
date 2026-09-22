@@ -25,6 +25,7 @@ window_exists(Window w)
 /* ---- workspace window list helpers ---- */
 
 static void write_net_wm_state(ManagedWindow *mw);
+static void scratch_raise_all(void);
 
 static int
 wins_ensure_cap(Workspace *ws)
@@ -288,15 +289,8 @@ show_workspace(int idx, int visible)
     }
 
     /* Keep scratchpad overlay raised above the newly mapped workspace */
-    if (visible && scratch_visible) {
-        Monitor *mon = curmon();
-        Workspace *sp = &spaces[SCRATCHPAD_IDX];
-        /* Dim goes above workspace, below scratchpad windows */
-        if (mon->dim_win)
-            XRaiseWindow(dpy, mon->dim_win);
-        for (i = 0; i < sp->nwin; i++)
-            XRaiseWindow(dpy, sp->wins[i].window);
-    }
+    if (visible && scratch_visible)
+        scratch_raise_all();
 }
 
 void
@@ -1051,6 +1045,7 @@ toggle_float(void)
 
 /* ---- scratchpad ---- */
 
+#if SCRATCHPAD_DIM
 /* Find an ARGB (depth-32) visual for semi-transparent windows.
    Returns 1 on success, 0 if no ARGB visual is available. */
 static int
@@ -1082,41 +1077,6 @@ parse_dim_color(unsigned int hex, unsigned char *r, unsigned char *g,
     *g = (hex >> 16) & 0xFF;
     *b = (hex >> 8)  & 0xFF;
     *a =  hex        & 0xFF;
-}
-
-/* Scratchpad overlay raise: map + raise every window in the scratchpad
-   so they stack above the dimmed underlying workspace. */
-static void
-scratch_raise_all(void)
-{
-    Workspace *ws = &spaces[SCRATCHPAD_IDX];
-    Monitor *mon = curmon();
-    int i;
-
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].is_fullscreen) {
-            ws->wins[i].x = mon->x;
-            ws->wins[i].y = mon->y;
-            ws->wins[i].width = mon->width;
-            ws->wins[i].height = mon->height;
-            XSetWindowBorderWidth(dpy, ws->wins[i].window, 0);
-            XMoveResizeWindow(dpy, ws->wins[i].window,
-                              mon->x, mon->y, mon->width, mon->height);
-        }
-        XMapWindow(dpy, ws->wins[i].window);
-        XRaiseWindow(dpy, ws->wins[i].window);
-    }
-}
-
-/* Scratchpad overlay unmap: hide every window in the scratchpad. */
-static void
-scratch_unmap_all(void)
-{
-    Workspace *ws = &spaces[SCRATCHPAD_IDX];
-    int i;
-
-    for (i = 0; i < ws->nwin; i++)
-        XUnmapWindow(dpy, ws->wins[i].window);
 }
 
 /* Create the dim overlay window for the scratchpad. */
@@ -1163,6 +1123,48 @@ scratchpad_destroy_dim(Monitor *mon)
         XFreeColormap(dpy, mon->dim_colormap);
         mon->dim_colormap = 0;
     }
+}
+#endif
+
+/* Scratchpad overlay raise: map + raise every window in the scratchpad
+   so they stack above the underlying workspace (and the dim overlay). */
+static void
+scratch_raise_all(void)
+{
+    Workspace *ws = &spaces[SCRATCHPAD_IDX];
+    Monitor *mon = curmon();
+    int i;
+
+#if SCRATCHPAD_DIM
+    /* Dim goes above workspace, below scratchpad windows */
+    if (mon->dim_win)
+        XRaiseWindow(dpy, mon->dim_win);
+#endif
+
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].is_fullscreen) {
+            ws->wins[i].x = mon->x;
+            ws->wins[i].y = mon->y;
+            ws->wins[i].width = mon->width;
+            ws->wins[i].height = mon->height;
+            XSetWindowBorderWidth(dpy, ws->wins[i].window, 0);
+            XMoveResizeWindow(dpy, ws->wins[i].window,
+                              mon->x, mon->y, mon->width, mon->height);
+        }
+        XMapWindow(dpy, ws->wins[i].window);
+        XRaiseWindow(dpy, ws->wins[i].window);
+    }
+}
+
+/* Scratchpad overlay unmap: hide every window in the scratchpad. */
+static void
+scratch_unmap_all(void)
+{
+    Workspace *ws = &spaces[SCRATCHPAD_IDX];
+    int i;
+
+    for (i = 0; i < ws->nwin; i++)
+        XUnmapWindow(dpy, ws->wins[i].window);
 }
 
 /* Move the focused window into the scratchpad workspace.
@@ -1226,18 +1228,19 @@ move_to_scratchpad(void)
     retile_deferred();
 }
 
-/* Show the scratchpad overlay: create dim, map windows, refocus. */
+/* Show the scratchpad overlay: map windows, refocus. */
 static void
 scratchpad_show(void)
 {
     Workspace *ws = &spaces[SCRATCHPAD_IDX];
     Workspace *under = &spaces[cur_ws];
-    Monitor *mon = curmon();
 
     scratch_saved_focus = under->focused;
     scratch_visible = 1;
 
-    scratchpad_create_dim(mon);
+#if SCRATCHPAD_DIM
+    scratchpad_create_dim(curmon());
+#endif
     retile_ws(&spaces[SCRATCHPAD_IDX]);
     scratch_raise_all();
 
@@ -1252,17 +1255,18 @@ scratchpad_show(void)
     }
 }
 
-/* Hide the scratchpad overlay: unmap windows, destroy dim, restore focus. */
+/* Hide the scratchpad overlay: unmap windows, restore focus. */
 static void
 scratchpad_hide(void)
 {
     Workspace *under = &spaces[cur_ws];
-    Monitor *mon = curmon();
 
     scratch_unmap_all();
     scratch_visible = 0;
 
-    scratchpad_destroy_dim(mon);
+#if SCRATCHPAD_DIM
+    scratchpad_destroy_dim(curmon());
+#endif
 
     /* Restore focus to the underlying workspace */
     if (scratch_saved_focus != None) {
@@ -1499,7 +1503,6 @@ handle_key_press(XKeyEvent *e)
             case FOCUS_PREV:         focus_cycle(-1); break;
             case SWAP_NEXT:          swap_impl(1); break;
             case SWAP_PREV:          swap_impl(-1); break;
-            case RESIZE_MASTER:      resize_master((void *)(long)keys[i].arg.i); break;
             case RESIZE_WINDOW:      resize_window((void *)(long)keys[i].arg.i); break;
             case SCROLL_LEFT:        move_horizontal(0); break;
             case SCROLL_RIGHT:       move_horizontal(1); break;

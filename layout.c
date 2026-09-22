@@ -302,108 +302,7 @@ tile_horizontal_ws(Workspace *ws)
     update_camera_ws(ws);
 }
 
-/* ---- tiling: master-stack layout ---- */
-/* Single-window fills the monitor.  Two or more: the first window
-   (master) occupies a fraction (master_factor) of the width on the left;
-   the remaining windows (stack) are stacked vertically on the right. */
-
-void
-tile_windows_ws(Workspace *ws)
-{
-    Monitor *mon = curmon();
-    int i;
-    int usable_h, usable_w, x_start, y_start;
-    int master_w, stack_x, stack_w, stack_h;
-
-    if (ws->ntiled == 0) return;
-
-    compute_usable_area(mon, &usable_w, &usable_h, &x_start, &y_start);
-
-    if (ws->ntiled == 1) {
-        ws->tiled[0]->x = x_start + GAP_OUTER;
-        ws->tiled[0]->y = y_start + GAP_OUTER;
-        ws->tiled[0]->width = usable_w - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        ws->tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        if (ws->tiled[0]->width < 1) ws->tiled[0]->width = 1;
-        if (ws->tiled[0]->height < 1) ws->tiled[0]->height = 1;
-
-        XMoveResizeWindow(dpy, ws->tiled[0]->window,
-                          ws->tiled[0]->x, ws->tiled[0]->y,
-                          ws->tiled[0]->width, ws->tiled[0]->height);
-    } else {
-        master_w = (int)(usable_w * mon->master_factor)
-                   - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
-        stack_x  = x_start + (int)(usable_w * mon->master_factor) + GAP_INNER;
-        stack_w  = usable_w - (int)(usable_w * mon->master_factor)
-                   - GAP_OUTER - GAP_INNER - 2 * BORDER_WIDTH;
-        if (master_w < 1) master_w = 1;
-        if (stack_w < 1) stack_w = 1;
-
-        stack_h = (usable_h - GAP_OUTER * 2 - GAP_INNER * (ws->ntiled - 1)) / (ws->ntiled - 1)
-                  - 2 * BORDER_WIDTH;
-        if (stack_h < 1) stack_h = 1;
-
-        ws->tiled[0]->x = x_start + GAP_OUTER;
-        ws->tiled[0]->y = y_start + GAP_OUTER;
-        ws->tiled[0]->width = master_w;
-        ws->tiled[0]->height = usable_h - 2 * GAP_OUTER - 2 * BORDER_WIDTH;
-        if (ws->tiled[0]->height < 1) ws->tiled[0]->height = 1;
-
-        for (i = 1; i < ws->ntiled; i++) {
-            ws->tiled[i]->x = stack_x;
-            ws->tiled[i]->y = y_start + GAP_OUTER
-                          + (i - 1) * (stack_h + GAP_INNER + 2 * BORDER_WIDTH);
-            ws->tiled[i]->width = stack_w;
-            ws->tiled[i]->height = stack_h;
-        }
-
-        for (i = 0; i < ws->ntiled; i++) {
-            XMoveResizeWindow(dpy, ws->tiled[i]->window,
-                              ws->tiled[i]->x, ws->tiled[i]->y,
-                              ws->tiled[i]->width, ws->tiled[i]->height);
-        }
-    }
-
-    XFlush(dpy);
-}
-
 /* ---- resize ---- */
-
-void
-resize_master(void *arg)
-{
-    Workspace *ws = curws();
-    Monitor *mon = NULL;
-    int delta = (int)(long)arg;
-    float delta_f;
-    int i;
-
-    if (ws->nwin < 2) return;
-
-    /* Find the monitor containing the focused window */
-    {
-        ManagedWindow *cur = focused_mw(ws);
-        if (cur) {
-            for (i = 0; i < nmons; i++) {
-                if (mons[i].x <= cur->x
-                    && cur->x < mons[i].x + mons[i].width) {
-                    mon = &mons[i];
-                    break;
-                }
-            }
-        }
-    }
-    if (!mon) mon = curmon();
-
-    if (mon->horizontal_mode) return;
-
-    delta_f = (float)delta / mon->width;
-    mon->master_factor += delta_f;
-    if (mon->master_factor < MIN_MASTER_VERT) mon->master_factor = MIN_MASTER_VERT;
-    if (mon->master_factor > MAX_MASTER_VERT) mon->master_factor = MAX_MASTER_VERT;
-
-    tile_windows_ws(ws);
-}
 
 void
 resize_window(void *arg)
@@ -418,7 +317,7 @@ resize_window(void *arg)
 
     /* In dwindle mode, use dwindle resize */
     if (!mon->horizontal_mode && ws->dwindle_root) {
-        dwindle_resize(ws, dir, RESIZE_STEP);
+        dwindle_resize(ws, RESIZE_STEP);
         dwindle_arrange(ws, mon);
         return;
     }
@@ -428,10 +327,7 @@ resize_window(void *arg)
     if (w->width_factor > MAX_WIDTH_FACTOR) w->width_factor = MAX_WIDTH_FACTOR;
     w->is_fit = 0;
 
-    if (mon->horizontal_mode)
-        tile_horizontal_ws(ws);
-    else
-        tile_windows_ws(ws);
+    tile_horizontal_ws(ws);
 }
 
 /* Returns 1 if the caller should toggle fullscreen (window was floating
@@ -550,14 +446,12 @@ toggle_layout(void)
     mon->horizontal_mode = !mon->horizontal_mode;
 
     if (mon->horizontal_mode) {
-        mon->master_factor = 1.0f;
         /* Leaving dwindle: remap monocle-hidden windows, cleanup tree */
         dwindle_unhide_all(ws);
         dwindle_cleanup(ws);
         rebuild_tiled(ws);
         tile_horizontal_ws(ws);
     } else {
-        mon->master_factor = 0.5f;
         /* Entering dwindle: build dwindle tree from all tiled windows */
         rebuild_tiled(ws);
         ws->dwindle_monocle = 0;
@@ -923,26 +817,22 @@ dwindle_find_fence(DwindleNode *leaf, int dir)
     return NULL;
 }
 
-/* Resize: adjust split ratio of the fence ancestor. */
+/* Resize: adjust split ratio of the nearest vertical-split ancestor.
+   Sign of delta selects shrink (west) vs grow (east). */
 void
-dwindle_resize(Workspace *ws, int dir, int delta)
+dwindle_resize(Workspace *ws, int delta)
 {
+    DwindleNode *fence;
+    float step;
+
     if (!ws->dwindle_focus || !ws->dwindle_focus->win) return;
 
-    /* Map keybind delta (-1/+1) to DWINDLE_DIR_* constants */
-    int d_dir;
-    if (delta < 0)
-        d_dir = DWINDLE_DIR_WEST;
-    else
-        d_dir = DWINDLE_DIR_EAST;
-
-    (void)dir;
-
-    DwindleNode *fence = dwindle_find_fence(ws->dwindle_focus, d_dir);
+    fence = dwindle_find_fence(ws->dwindle_focus,
+                               delta < 0 ? DWINDLE_DIR_WEST : DWINDLE_DIR_EAST);
     if (!fence) return;
 
-    float step = (float)abs(delta) / DWINDLE_SPLIT_STEP;
-    if (d_dir == DWINDLE_DIR_WEST || d_dir == DWINDLE_DIR_NORTH)
+    step = (float)abs(delta) / DWINDLE_SPLIT_STEP;
+    if (delta < 0)
         step = -step;
 
     fence->split_ratio += step;

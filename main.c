@@ -102,8 +102,6 @@ Key keys[] = {
     { MODKEY,           XK_l,      FOCUS_NEXT,     { 0 } },
     { MODKEY|SHTKEY,    XK_h,      SWAP_PREV,      { 0 } },
     { MODKEY|SHTKEY,    XK_l,      SWAP_NEXT,      { 0 } },
-    { MODKEY|ControlMask, XK_h,    RESIZE_MASTER,  { .i = -RESIZE_STEP } },
-    { MODKEY|ControlMask, XK_l,    RESIZE_MASTER,  { .i = +RESIZE_STEP } },
     { MODKEY|Mod1Mask,  XK_h,      RESIZE_WINDOW,  { .i = -1 } },
     { MODKEY|Mod1Mask,  XK_l,      RESIZE_WINDOW,  { .i = +1 } },
     { MODKEY,           XK_Left,   SCROLL_LEFT,    { 0 } },
@@ -306,11 +304,12 @@ monitors_init(void)
                 mons[i].width = info[i].width;
                 mons[i].height = info[i].height;
                 mons[i].current_workspace = i < NUM_WORKSPACES ? i : 0;
-                mons[i].master_factor = 0.5f;
                 mons[i].horizontal_mode = 1;
                 mons[i].strut_valid = 0;
+#if SCRATCHPAD_DIM
                 mons[i].dim_win = 0;
                 mons[i].dim_colormap = 0;
+#endif
             }
             XFree(info);
         }
@@ -325,11 +324,12 @@ monitors_init(void)
         mons[0].width = scrw;
         mons[0].height = scrh;
         mons[0].current_workspace = 0;
-        mons[0].master_factor = 0.5f;
         mons[0].horizontal_mode = 1;
         mons[0].strut_valid = 0;
+#if SCRATCHPAD_DIM
         mons[0].dim_win = 0;
         mons[0].dim_colormap = 0;
+#endif
     }
 }
 
@@ -411,6 +411,7 @@ cleanup(void)
         spaces[i].wins = NULL;
         spaces[i].tiled = NULL;
     }
+#if SCRATCHPAD_DIM
     /* Destroy any lingering dim overlay */
     for (i = 0; i < nmons; i++) {
         if (mons[i].dim_win) {
@@ -422,6 +423,7 @@ cleanup(void)
             mons[i].dim_colormap = 0;
         }
     }
+#endif
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
     XSetInputFocus(dpy, PointerRoot, RevertToPointerRoot, CurrentTime);
     XSync(dpy, False);

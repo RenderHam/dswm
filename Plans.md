@@ -53,10 +53,12 @@
 
 ## Phase D — simplify
 
-- [ ] D1. Scratchpad dim overlay (ARGB/colormap churn for cosmetic dim).
-- [ ] D2. Orphaned master-stack layout (`tile_windows_ws` unreachable from `retile_ws`).
-- [ ] D3. `FIT_WINDOW`/width-factor vs dwindle-resize duality review.
-- [ ] D4. Fold scattered `XRaiseWindow` loops into one `restack_workspace` helper.
+- [x] D1. Scratchpad dim overlay — restored as configurable: `SCRATCHPAD_DIM`
+  + `DIM_COLOR` in `dswm.h` (default on). All dim code (ARGB visual, colormap,
+  create/destroy, init/cleanup) is `#if`-guarded; both 0/1 branches compile clean.
+- [x] D2. Orphaned master-stack layout (`tile_windows_ws` unreachable from `retile_ws`).
+- [x] D3. `FIT_WINDOW`/width-factor vs dwindle-resize duality review.
+- [x] D4. Fold scattered `XRaiseWindow` loops into one `restack_workspace` helper.
 
 ## Log
 
@@ -65,3 +67,4 @@
 - 2026-09-23: Phase B partial (B1/B3/B4) done. Zero warnings. B2 pending user decision.
 - 2026-09-23: Phase B complete (B2 explicit-focus raise). Zero warnings. Not committed per user request.
 - 2026-09-23: Phase C complete (C1-C7). Zero warnings. Not committed per user request.
+- 2026-09-23: Phase D complete (D1-D4). Zero warnings. Not committed per user request.

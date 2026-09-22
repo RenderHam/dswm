@@ -19,6 +19,8 @@
 #define BORDER_COLOR       0x181818
 #define FOCUS_COLOR        0x005577
 #define URGENT_COLOR       0xCC4400
+
+#define SCRATCHPAD_DIM     1   /* 1 = dim workspace under scratchpad overlay */
 #define DIM_COLOR          0x000000CC  /* RRGGBBAA — alpha baked into pixel */
 
 #define GAP_OUTER          10
@@ -37,8 +39,6 @@
 #define INITIAL_CAP        16
 #define MIN_WIN_DIM        10
 #define NELEM(x)           (sizeof(x) / sizeof(x[0]))
-#define MIN_MASTER_VERT    0.1f
-#define MAX_MASTER_VERT    0.9f
 #define DWINDLE_SPLIT_RATIO    0.5f
 #define DWINDLE_MIN_NODE       32
 #define DWINDLE_RATIO_MIN  0.1f
@@ -121,12 +121,13 @@ struct Monitor {
     int x, y;
     int width, height;
     int current_workspace;
-    float master_factor;
     int horizontal_mode;
     int strut_top, strut_bottom, strut_left, strut_right;
     int strut_valid;
-    Window dim_win;  /* fullscreen dim overlay for scratchpad */
+#if SCRATCHPAD_DIM
+    Window dim_win;  /* dim overlay under the scratchpad */
     Colormap dim_colormap;
+#endif
 };
 
 typedef struct Workspace Workspace;
@@ -162,7 +163,7 @@ enum {
     SPAWN, CLOSE, QUIT,
     FOCUS_NEXT, FOCUS_PREV,
     SWAP_PREV, SWAP_NEXT,
-    RESIZE_MASTER, RESIZE_WINDOW,
+    RESIZE_WINDOW,
     SCROLL_LEFT, SCROLL_RIGHT,
     TOGGLE_LAYOUT,     TOGGLE_FULLSCREEN, TOGGLE_FLOAT, FIT_WINDOW, TOGGLE_CENTER_FOCUS,
     TOGGLE_SCRATCHPAD, MOVE_TO_SCRATCHPAD,
@@ -268,7 +269,6 @@ int window_exists(Window w);
 void update_camera_ws(Workspace *ws);
 void raise_above_windows(Workspace *ws);
 void tile_horizontal_ws(Workspace *ws);
-void tile_windows_ws(Workspace *ws);
 void retile_ws(Workspace *ws);
 void retile_deferred(void);
 void flush_retile(void);
@@ -286,7 +286,7 @@ void     layout_remove(Workspace *ws, Window w);
 void     dwindle_arrange(Workspace *ws, Monitor *mon);
 void     dwindle_cleanup(Workspace *ws);
 void     dwindle_focus_cycle(Workspace *ws, int delta);
-void     dwindle_resize(Workspace *ws, int dir, int delta);
+void     dwindle_resize(Workspace *ws, int delta);
 ManagedWindow *dwindle_focused_mw(Workspace *ws);
 ManagedWindow *dwindle_find_mw(Workspace *ws, Window w);
 void           dwindle_set_focus(Workspace *ws, Window w);
@@ -310,7 +310,6 @@ void toggle_fullscreen(void);
 void toggle_float(void);
 void toggle_scratchpad(void);
 void move_to_scratchpad(void);
-void resize_master(void *arg);
 void resize_window(void *arg);
 int fit_window(void);
 void spawn(void *arg);
