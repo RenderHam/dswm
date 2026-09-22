@@ -37,52 +37,69 @@ wins_ensure_cap(Workspace *ws)
     return 1;
 }
 
-/* Find the index of ws->focused in ws->wins[].  Returns -1 if not found. */
-static int
-find_focused_idx(Workspace *ws)
+/* Find a managed window by ID.  Returns NULL if not present. */
+ManagedWindow *
+find_mw(Workspace *ws, Window w)
 {
     int i;
-    if (!ws->focused) return -1;
+    if (w == None) return NULL;
     for (i = 0; i < ws->nwin; i++)
-        if (&ws->wins[i] == ws->focused)
-            return i;
-    return -1;
+        if (ws->wins[i].window == w)
+            return &ws->wins[i];
+    return NULL;
+}
+
+/* Find a managed window by ID across all workspaces. */
+ManagedWindow *
+find_mw_any(Window w)
+{
+    int j;
+    if (w == None) return NULL;
+    for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+        ManagedWindow *mw = find_mw(&spaces[j], w);
+        if (mw) return mw;
+    }
+    return NULL;
+}
+
+/* Resolve the workspace's focused ID to a live pointer.
+   Returns NULL when nothing is focused or the window is gone. */
+ManagedWindow *
+focused_mw(Workspace *ws)
+{
+    return find_mw(ws, ws->focused);
 }
 
 /* Refocus the workspace after a window at 'removed' index was memmoved out.
-   Handles both cases: focused window was removed, or a different window. */
+   Focus is tracked by ID, so removal only matters when the focused window
+   itself was removed — otherwise the ID still resolves. */
 static void
 refocus_after_remove(Workspace *ws, int removed)
 {
+    ManagedWindow *mw;
+
     if (ws->nwin == 0) {
-        ws->focused = NULL;
+        ws->focused = None;
         return;
     }
 
-    int fi = find_focused_idx(ws);
-    int ni;
-
-    if (fi == -1) {
-        /* Focused pointer was invalidated by memmove — find the window
-           that shifted into the removed slot, or fall back to the end. */
-        ni = removed;
+    mw = focused_mw(ws);
+    if (!mw) {
+        /* Focused window was removed — fall back to the window that
+           shifted into the removed slot, or the end of the list. */
+        int ni = removed;
         if (ni >= ws->nwin) ni = ws->nwin - 1;
-    } else if (fi > removed) {
-        /* Focused window shifted left by one due to memmove */
-        ni = fi - 1;
-    } else {
-        /* Focused window was not affected by the removal */
-        ni = fi;
+        mw = &ws->wins[ni];
     }
 
-    ws->focused = &ws->wins[ni];
-    if (ws->focused->is_not_focusable) {
-        update_border(ws->focused->window, 0);
+    ws->focused = mw->window;
+    if (mw->is_not_focusable) {
+        update_border(mw->window, 0);
         return;
     }
-    update_border(ws->focused->window, 1);
-    if (window_exists(ws->focused->window))
-        XSetInputFocus(dpy, ws->focused->window, RevertToPointerRoot, CurrentTime);
+    update_border(mw->window, 1);
+    if (window_exists(mw->window))
+        XSetInputFocus(dpy, mw->window, RevertToPointerRoot, CurrentTime);
 }
 
 /* ---- focus ---- */
@@ -95,10 +112,10 @@ update_border(Window w, int focused)
 void
 refocus(Workspace *ws, ManagedWindow *next)
 {
-    if (ws->focused && ws->focused != next)
-        update_border(ws->focused->window, 0);
+    if (ws->focused != None && (!next || ws->focused != next->window))
+        update_border(ws->focused, 0);
 
-    ws->focused = next;
+    ws->focused = next ? next->window : None;
     if (next) {
         /* _NET_WM_STATE_NOT_FOCUSABLE windows don't receive focus */
         if (next->is_not_focusable) {
@@ -164,7 +181,7 @@ move_horizontal(int forward)
     if (ws->ntiled == 0) return;
 
     for (i = 0; i < ws->ntiled; i++) {
-        if (ws->tiled[i] == ws->focused) {
+        if (ws->tiled[i]->window == ws->focused) {
             idx = i;
             break;
         }
@@ -193,12 +210,15 @@ swap_impl(int delta)
     ManagedWindow tmp;
     int ti, si, wi, wj;
 
-    if (ws->ntiled < 2 || !ws->focused) return;
-    if (ws->focused->is_floating) return;
+    ManagedWindow *cur;
+
+    if (ws->ntiled < 2 || ws->focused == None) return;
+    cur = focused_mw(ws);
+    if (!cur || cur->is_floating) return;
 
     /* Find focused window in tiled[] */
     for (ti = 0; ti < ws->ntiled; ti++)
-        if (ws->tiled[ti] == ws->focused)
+        if (ws->tiled[ti]->window == ws->focused)
             break;
     if (ti == ws->ntiled) return;
 
@@ -215,8 +235,8 @@ swap_impl(int delta)
 
     retile_deferred();
 
-    ws->focused = &ws->wins[wj];
-    refocus(ws, ws->focused);
+    ws->focused = ws->wins[wj].window;
+    refocus(ws, &ws->wins[wj]);
 }
 
 /* ---- workspace management ---- */
@@ -231,6 +251,9 @@ show_workspace(int idx, int visible)
         /* Sticky windows are never unmapped — they stay visible on all
            workspaces.  When showing a workspace, always map them. */
         if (!visible && ws->wins[i].is_sticky)
+            continue;
+        /* Monocle-hidden windows stay hidden until monocle exits */
+        if (visible && ws->wins[i].monocle_hidden)
             continue;
         if (visible)
             XMapWindow(dpy, ws->wins[i].window);
@@ -274,13 +297,16 @@ move_to_workspace(void *arg)
     ManagedWindow win;
     int i, found = 0;
 
+    ManagedWindow *cur;
+
     if (idx < 0 || idx >= NUM_WORKSPACES) return;
     if (idx == cur_ws) return;
-    if (!ws->focused) return;
+    cur = focused_mw(ws);
+    if (!cur) return;
 
-    /* Copy the window to the stack — memmove below invalidates the pointer
-       that ws->focused points into, so we need a local snapshot. */
-    win = *ws->focused;
+    /* Copy the window to the stack — memmove below would invalidate any
+       pointer into wins[], so we work from a local snapshot. */
+    win = *cur;
 
     /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
     layout_remove(ws, win.window);
@@ -313,7 +339,7 @@ move_to_workspace(void *arg)
     }
 
     target->wins[target->nwin++] = win;
-    target->focused = &target->wins[target->nwin - 1];
+    target->focused = win.window;
 
     rebuild_tiled(target);
 
@@ -440,9 +466,9 @@ insert_into_workspace(Workspace *ws, ManagedWindow mw)
     int insert_idx = ws->nwin;
     int i;
 
-    if (ws->focused) {
+    if (ws->focused != None) {
         for (i = 0; i < ws->nwin; i++) {
-            if (&ws->wins[i] == ws->focused) {
+            if (ws->wins[i].window == ws->focused) {
                 insert_idx = i + 1;
                 break;
             }
@@ -621,7 +647,7 @@ focus_cycle(int delta)
     if (ws->ntiled == 0) return;
 
     for (i = 0; i < ws->ntiled; i++) {
-        if (ws->tiled[i] == ws->focused) {
+        if (ws->tiled[i]->window == ws->focused) {
             idx = i;
             break;
         }
@@ -690,7 +716,7 @@ handle_client_message(XClientMessageEvent *e)
             if (want_fs == mw->is_fullscreen)
                 return;
 
-            if (ws->focused != mw)
+            if (ws->focused != mw->window)
                 refocus(ws, mw);
             toggle_fullscreen();
             return;
@@ -712,7 +738,7 @@ handle_client_message(XClientMessageEvent *e)
 
         if (mw->workspace != cur_ws && !mw->is_sticky)
             switch_workspace((void *)(long)mw->workspace);
-        if (ws->focused != mw)
+        if (ws->focused != mw->window)
             refocus(ws, mw);
         return;
     }
@@ -730,16 +756,17 @@ void
 close_window(void)
 {
     Workspace *ws = active_ws();
+    ManagedWindow *w = focused_mw(ws);
     XEvent ev;
     Atom *protocols = NULL;
     int nprotocols = 0;
     int supports_delete = 0;
     int i;
 
-    if (!ws->focused) return;
+    if (!w) return;
 
     /* Check if window supports WM_DELETE_WINDOW */
-    if (XGetWMProtocols(dpy, ws->focused->window, &protocols, &nprotocols)) {
+    if (XGetWMProtocols(dpy, w->window, &protocols, &nprotocols)) {
         for (i = 0; i < nprotocols; i++) {
             if (protocols[i] == atom_wm_delete) {
                 supports_delete = 1;
@@ -751,13 +778,13 @@ close_window(void)
 
     if (supports_delete) {
         ev.xclient.type = ClientMessage;
-        ev.xclient.window = ws->focused->window;
+        ev.xclient.window = w->window;
         ev.xclient.message_type = atom_wm_protocols;
         ev.xclient.format = 32;
         ev.xclient.data.l[0] = atom_wm_delete;
-        XSendEvent(dpy, ws->focused->window, False, NoEventMask, &ev);
+        XSendEvent(dpy, w->window, False, NoEventMask, &ev);
     } else {
-        XKillClient(dpy, ws->focused->window);
+        XKillClient(dpy, w->window);
     }
 }
 
@@ -773,7 +800,7 @@ void
 toggle_fullscreen(void)
 {
     Workspace *ws = active_ws();
-    ManagedWindow *w = ws->focused;
+    ManagedWindow *w = focused_mw(ws);
 
     if (!w) return;
 
@@ -782,8 +809,9 @@ toggle_fullscreen(void)
     if (w->is_fullscreen) {
         tiled_remove(ws, w->window);
         layout_remove(ws, w->window);
-    } else {
-        /* Re-insert into layout BEFORE restoring is_floating */
+    } else if (!w->pre_fs_floating) {
+        /* Was tiled before fullscreen: re-insert into layout.
+           Previously-floating windows must NOT be added to tiled[]. */
         tiled_add(ws, w);
         layout_insert(ws, w->window);
     }
@@ -855,7 +883,7 @@ void
 toggle_float(void)
 {
     Workspace *ws = active_ws();
-    ManagedWindow *w = ws->focused;
+    ManagedWindow *w = focused_mw(ws);
     Monitor *mon = curmon();
     int i;
 
@@ -867,7 +895,7 @@ toggle_float(void)
         /* Save tiled geometry and position for snap-back */
         int idx = -1;
         for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == w) { idx = i; break; }
+            if (ws->tiled[i]->window == w->window) { idx = i; break; }
         }
         w->pre_float_idx = idx;
 
@@ -1036,12 +1064,14 @@ move_to_scratchpad(void)
     Workspace *src = curws();
     Workspace *dst = &spaces[SCRATCHPAD_IDX];
     ManagedWindow win;
+    ManagedWindow *cur;
     int i, found = 0;
 
-    if (!src->focused) return;
     if (src == dst) return;
+    cur = focused_mw(src);
+    if (!cur) return;
 
-    win = *src->focused;
+    win = *cur;
 
     /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
     layout_remove(src, win.window);
@@ -1101,11 +1131,14 @@ scratchpad_show(void)
     retile_ws(&spaces[SCRATCHPAD_IDX]);
     scratch_raise_all();
 
-    if (ws->focused) {
-        refocus(ws, ws->focused);
-    } else if (ws->nwin > 0) {
-        ws->focused = &ws->wins[0];
-        refocus(ws, ws->focused);
+    {
+        ManagedWindow *cur = focused_mw(ws);
+        if (cur) {
+            refocus(ws, cur);
+        } else if (ws->nwin > 0) {
+            ws->focused = ws->wins[0].window;
+            refocus(ws, &ws->wins[0]);
+        }
     }
 }
 
@@ -1115,7 +1148,6 @@ scratchpad_hide(void)
 {
     Workspace *under = &spaces[cur_ws];
     Monitor *mon = curmon();
-    int i;
 
     scratch_unmap_all();
     scratch_visible = 0;
@@ -1123,20 +1155,15 @@ scratchpad_hide(void)
     scratchpad_destroy_dim(mon);
 
     /* Restore focus to the underlying workspace */
-    if (scratch_saved_focus) {
-        int valid = 0;
-        for (i = 0; i < under->nwin; i++) {
-            if (&under->wins[i] == scratch_saved_focus) {
-                valid = 1;
-                break;
-            }
-        }
-        if (valid)
-            refocus(under, scratch_saved_focus);
+    if (scratch_saved_focus != None) {
+        ManagedWindow *saved = find_mw(under, scratch_saved_focus);
+        if (saved)
+            refocus(under, saved);
         else if (under->nwin > 0)
             refocus(under, &under->wins[0]);
         else
-            under->focused = NULL;
+            under->focused = None;
+        scratch_saved_focus = None;
     } else if (under->nwin > 0) {
         refocus(under, &under->wins[0]);
     }
@@ -1177,7 +1204,7 @@ grab_mouse(ManagedWindow *mw, int resizing, XButtonEvent *e)
 {
     mouse.active = 1;
     mouse.resizing = resizing;
-    mouse.win = mw;
+    mouse.win = mw->window;
     mouse.start_x = e->x_root;
     mouse.start_y = e->y_root;
     if (resizing) {
@@ -1207,6 +1234,11 @@ handle_destroy_notify(XDestroyWindowEvent *e)
 void
 handle_unmap_notify(XUnmapEvent *e)
 {
+    ManagedWindow *mw = find_mw_any(e->window);
+
+    /* Windows hidden by monocle are still managed — ignore their unmaps */
+    if (mw && mw->monocle_hidden)
+        return;
     unmanage_window(e->window, 0);
 }
 
@@ -1280,6 +1312,9 @@ handle_enter_notify(XCrossingEvent *e)
     Workspace *ws = active_ws();
     int i;
 
+    /* Never steal focus mid-drag — the drag target keeps focus */
+    if (mouse.active) return;
+
     if (e->mode != NotifyNormal || e->detail == NotifyInferior) return;
 
     for (i = 0; i < ws->nwin; i++) {
@@ -1309,9 +1344,12 @@ handle_focus_in(XFocusInEvent *e)
         return;
 
     /* If focus went to root, re-focus the active window */
-    if (e->window == root) {
-        if (ws->focused && ws->focused->window != root)
-            refocus(ws, ws->focused);
+    if (e->window == root && ws->focused != None && ws->focused != root) {
+        ManagedWindow *cur = focused_mw(ws);
+        if (cur)
+            refocus(ws, cur);
+        else
+            ws->focused = None;
     }
 }
 
@@ -1367,7 +1405,7 @@ handle_button_press(XButtonEvent *e)
             if (!mw->is_floating || mw->is_fullscreen) continue;
             if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
                 && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-                if (ws->focused != mw) refocus(ws, mw);
+                if (ws->focused != mw->window) refocus(ws, mw);
                 grab_mouse(mw, 1, e);
                 return;
             }
@@ -1382,7 +1420,7 @@ handle_button_press(XButtonEvent *e)
         if (!mw->is_floating || mw->is_fullscreen) continue;
         if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
             && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
-            if (ws->focused != mw) refocus(ws, mw);
+            if (ws->focused != mw->window) refocus(ws, mw);
             grab_mouse(mw, 0, e);
             return;
         }
@@ -1396,16 +1434,27 @@ handle_button_release(XButtonEvent *e)
 
     mouse.active = 0;
     mouse.resizing = 0;
-    mouse.win = NULL;
+    mouse.win = None;
     XUngrabPointer(dpy, CurrentTime);
 }
 
 void
 handle_motion_notify(XMotionEvent *e)
 {
+    ManagedWindow *mw;
     int dx, dy;
 
-    if (!mouse.active || !mouse.win) return;
+    if (!mouse.active || mouse.win == None) return;
+
+    /* Resolve the drag target by ID — wins[] may have moved since grab */
+    mw = find_mw_any(mouse.win);
+    if (!mw) {
+        mouse.active = 0;
+        mouse.resizing = 0;
+        mouse.win = None;
+        XUngrabPointer(dpy, CurrentTime);
+        return;
+    }
 
     dx = e->x_root - mouse.start_x;
     dy = e->y_root - mouse.start_y;
@@ -1422,18 +1471,15 @@ handle_motion_notify(XMotionEvent *e)
         int nh = mouse.orig_h + dy;
         if (nw < MIN_WIN_DIM) nw = MIN_WIN_DIM;
         if (nh < MIN_WIN_DIM) nh = MIN_WIN_DIM;
-        mouse.win->width = nw;
-        mouse.win->height = nh;
-        XMoveResizeWindow(dpy, mouse.win->window,
-                          mouse.win->x, mouse.win->y, nw, nh);
+        mw->width = nw;
+        mw->height = nh;
+        XMoveResizeWindow(dpy, mw->window, mw->x, mw->y, nw, nh);
         return;
     }
 
-    mouse.win->x = mouse.orig_x + dx;
-    mouse.win->y = mouse.orig_y + dy;
-    XMoveResizeWindow(dpy, mouse.win->window,
-                      mouse.win->x, mouse.win->y,
-                      mouse.win->width, mouse.win->height);
+    mw->x = mouse.orig_x + dx;
+    mw->y = mouse.orig_y + dy;
+    XMoveResizeWindow(dpy, mw->window, mw->x, mw->y, mw->width, mw->height);
 }
 
 void
@@ -1514,7 +1560,7 @@ handle_property_notify(XPropertyEvent *e)
     /* Handle fullscreen state change from client */
     if (mw->is_fullscreen != was_fullscreen) {
         Workspace *aws = active_ws();
-        if (aws->focused != mw)
+        if (aws->focused != mw->window)
             refocus(aws, mw);
         toggle_fullscreen();
         return;

@@ -211,19 +211,19 @@ update_camera_ws(Workspace *ws)
     int total_w = ws->tiled[last]->x + ws->tiled[last]->width
                 + GAP_OUTER + 2 * BORDER_WIDTH - x_start;
 
-    if (center_focused && ws->focused) {
+    if (center_focused && ws->focused != None) {
         for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == ws->focused) {
+            if (ws->tiled[i]->window == ws->focused) {
                 int outer = ws->tiled[i]->width + 2 * BORDER_WIDTH;
                 cam_x = ws->tiled[i]->x - x_start - (usable_w - outer) / 2;
                 centered = 1;
                 break;
             }
         }
-    } else if (ws->focused) {
+    } else if (ws->focused != None) {
         cam_x = ws->cam_x;
         for (i = 0; i < ws->ntiled; i++) {
-            if (ws->tiled[i] == ws->focused) {
+            if (ws->tiled[i]->window == ws->focused) {
                 int col = ws->tiled[i]->width + 2 * GAP_OUTER + 2 * BORDER_WIDTH;
                 int col_left = ws->tiled[i]->x - x_start - GAP_OUTER;
                 int col_right = col_left + col;
@@ -381,12 +381,15 @@ resize_master(void *arg)
     if (ws->nwin < 2) return;
 
     /* Find the monitor containing the focused window */
-    if (ws->focused) {
-        for (i = 0; i < nmons; i++) {
-            if (mons[i].x <= ws->focused->x
-                && ws->focused->x < mons[i].x + mons[i].width) {
-                mon = &mons[i];
-                break;
+    {
+        ManagedWindow *cur = focused_mw(ws);
+        if (cur) {
+            for (i = 0; i < nmons; i++) {
+                if (mons[i].x <= cur->x
+                    && cur->x < mons[i].x + mons[i].width) {
+                    mon = &mons[i];
+                    break;
+                }
             }
         }
     }
@@ -407,7 +410,7 @@ resize_window(void *arg)
 {
     Workspace *ws = active_ws();
     Monitor *mon = curmon();
-    ManagedWindow *w = ws->focused;
+    ManagedWindow *w = focused_mw(ws);
     int dir = (int)(long)arg;
 
     if (!w) return;
@@ -439,7 +442,7 @@ fit_window(void)
 {
     Workspace *ws = active_ws();
     Monitor *mon = curmon();
-    ManagedWindow *w = ws->focused;
+    ManagedWindow *w = focused_mw(ws);
     if (!w) return 0;
 
     if (w->is_floating || w->is_fullscreen)
@@ -512,6 +515,20 @@ flush_retile(void)
 
 /* ---- layout toggles ---- */
 
+/* Remap windows hidden by monocle and clear their flags.  Called when
+   leaving monocle/dwindle so no window stays hidden by accident. */
+static void
+dwindle_unhide_all(Workspace *ws)
+{
+    int i;
+    for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].monocle_hidden) {
+            ws->wins[i].monocle_hidden = 0;
+            XMapWindow(dpy, ws->wins[i].window);
+        }
+    }
+}
+
 void
 toggle_center_focus(void)
 {
@@ -530,7 +547,8 @@ toggle_layout(void)
 
     if (mon->horizontal_mode) {
         mon->master_factor = 1.0f;
-        /* Leaving dwindle: cleanup dwindle tree */
+        /* Leaving dwindle: remap monocle-hidden windows, cleanup tree */
+        dwindle_unhide_all(ws);
         dwindle_cleanup(ws);
         rebuild_tiled(ws);
         tile_horizontal_ws(ws);
@@ -635,7 +653,7 @@ dwindle_insert(Workspace *ws, Window w)
     anchor = ws->dwindle_focus;
     if (!anchor || !anchor->win)
         anchor = dwindle_find_focused_leaf(ws->dwindle_root);
-    if (!anchor) anchor = dwindle_find_leaf(ws->dwindle_root, ws->focused ? ws->focused->window : 0);
+    if (!anchor) anchor = dwindle_find_leaf(ws->dwindle_root, ws->focused);
     if (!anchor) anchor = ws->dwindle_root;
 
     grandparent = anchor->parent;
@@ -792,7 +810,8 @@ dwindle_arrange(Workspace *ws, Monitor *mon)
                 XRaiseWindow(dpy, mw->window);
             }
         }
-        /* Hide all other tiled leaves */
+        /* Hide all other tiled leaves (flagged so their UnmapNotify
+           is ignored — they are still managed) */
         {
             DwindleNode *leaves[MAX_LEAVES];
             int nleaves = dwindle_collect_leaves(ws, leaves, MAX_LEAVES);
@@ -800,13 +819,19 @@ dwindle_arrange(Workspace *ws, Monitor *mon)
             for (li = 0; li < nleaves; li++) {
                 if (leaves[li] != ws->dwindle_focus) {
                     ManagedWindow *mw = dwindle_find_mw(ws, leaves[li]->win);
-                    if (mw) XUnmapWindow(dpy, mw->window);
+                    if (mw && !mw->monocle_hidden) {
+                        mw->monocle_hidden = 1;
+                        XUnmapWindow(dpy, mw->window);
+                    }
                 }
             }
         }
         XFlush(dpy);
         return;
     }
+
+    /* Leaving monocle: remap anything still hidden */
+    dwindle_unhide_all(ws);
 
     dwindle_apply_layout(ws, ws->dwindle_root, x_start, y_start, usable_w, usable_h);
     XFlush(dpy);

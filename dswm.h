@@ -69,6 +69,7 @@ struct ManagedWindow {
     int is_sticky      : 1;  /* _NET_WM_STATE_STICKY — visible all workspaces */
     int is_not_focusable : 1; /* _NET_WM_STATE_NOT_FOCUSABLE */
     int input_hint        : 1; /* ICCCM WM_HINTS input field */
+    int monocle_hidden    : 1; /* unmapped by monocle, not withdrawn */
     int workspace      : 4;
     int monitor        : 3;
     /* cold fields: only on fullscreen toggle / save-restore */
@@ -103,7 +104,7 @@ struct DwindleNode {
 typedef struct {
     int active;           /* 0=idle, 1=dragging */
     int resizing;         /* 1=resizing floating window */
-    ManagedWindow *win;   /* window being dragged/resized */
+    Window win;           /* window being dragged/resized (None = none) */
     int start_x, start_y; /* cursor position at grab */
     int orig_x, orig_y;   /* original window position */
     int orig_w, orig_h;   /* original window size (for resize) */
@@ -128,7 +129,7 @@ struct Workspace {
     ManagedWindow *wins;
     int nwin;
     int cap;
-    ManagedWindow *focused;
+    Window focused;       /* focused window ID (None = none) */
     int cam_x;
     ManagedWindow **tiled;
     int ntiled;
@@ -202,7 +203,7 @@ extern int nmons;
 extern Workspace spaces[NUM_WORKSPACES + 1];
 extern MouseState mouse;
 extern int scratch_visible;
-extern ManagedWindow *scratch_saved_focus;
+extern Window scratch_saved_focus;
 
 /* cached atoms (owned by main.c) */
 extern Atom atom_wm_delete;
@@ -246,6 +247,12 @@ int  tiled_ensure_cap(Workspace *ws);
 void tiled_add(Workspace *ws, ManagedWindow *mw);
 void tiled_remove(Workspace *ws, Window w);
 void rebuild_tiled(Workspace *ws);
+
+/* ID-based lookups (wm.c) — persistent state stores Window IDs, never
+   raw pointers into wins[] (which moves on realloc/memmove). */
+ManagedWindow *find_mw(Workspace *ws, Window w);
+ManagedWindow *find_mw_any(Window w);
+ManagedWindow *focused_mw(Workspace *ws);
 
 void update_camera_ws(Workspace *ws);
 void raise_above_windows(Workspace *ws);

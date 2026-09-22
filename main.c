@@ -28,7 +28,7 @@ int nmons;
 Workspace spaces[NUM_WORKSPACES + 1];
 MouseState mouse;
 int scratch_visible;
-ManagedWindow *scratch_saved_focus;
+Window scratch_saved_focus;
 
 /* cached atoms */
 Atom atom_wm_delete;
@@ -328,7 +328,7 @@ init(void)
         ws->wins = NULL;
         ws->nwin = 0;
         ws->cap = 0;
-        ws->focused = NULL;
+        ws->focused = None;
         ws->cam_x = 0;
         ws->tiled = NULL;
         ws->ntiled = 0;
@@ -343,7 +343,8 @@ init(void)
     signal(SIGCHLD, SIG_IGN);
 
     scratch_visible = 0;
-    scratch_saved_focus = NULL;
+    scratch_saved_focus = None;
+    mouse.win = None;
 
     /* map existing windows */
     {
