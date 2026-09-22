@@ -24,6 +24,8 @@ window_exists(Window w)
 
 /* ---- workspace window list helpers ---- */
 
+static void write_net_wm_state(ManagedWindow *mw);
+
 static int
 wins_ensure_cap(Workspace *ws)
 {
@@ -117,11 +119,22 @@ update_border(Window w, int focused)
 {
     XSetWindowBorder(dpy, w, focused ? FOCUS_COLOR : BORDER_COLOR);
 }
+/* Clear the old focus border, preserving urgency indication. */
+static void
+unfocus_border(Workspace *ws, Window w)
+{
+    ManagedWindow *old = find_mw(ws, w);
+    if (old && old->urgent)
+        XSetWindowBorder(dpy, w, URGENT_COLOR);
+    else
+        update_border(w, 0);
+}
+
 void
 refocus(Workspace *ws, ManagedWindow *next)
 {
     if (ws->focused != None && (!next || ws->focused != next->window))
-        update_border(ws->focused, 0);
+        unfocus_border(ws, ws->focused);
 
     ws->focused = next ? next->window : None;
     if (next) {
@@ -129,6 +142,11 @@ refocus(Workspace *ws, ManagedWindow *next)
         if (next->is_not_focusable) {
             update_border(next->window, 0);
             return;
+        }
+        /* Focusing clears urgency — drop the demand from EWMH state */
+        if (next->urgent) {
+            next->urgent = 0;
+            write_net_wm_state(next);
         }
         update_border(next->window, 1);
         /* No raise here: stacking changes only on explicit focus
@@ -297,44 +315,40 @@ switch_workspace(void *arg)
     update_ewmh_current_desktop();
 }
 
-void
-move_to_workspace(void *arg)
+/* Move an arbitrary managed window to another workspace.  Shared by the
+   move-to-workspace keybinding and _NET_WM_DESKTOP client messages. */
+static void
+move_window_to_workspace(Window w, int idx)
 {
-    int idx = (int)(long)arg;
-    Workspace *ws = curws();
+    Workspace *src = NULL;
+    Workspace *target;
     ManagedWindow win;
-    int i, found = 0;
-
-    ManagedWindow *cur;
+    int i, j, removed = -1;
 
     if (idx < 0 || idx >= NUM_WORKSPACES) return;
-    if (idx == cur_ws) return;
-    cur = focused_mw(ws);
-    if (!cur) return;
 
-    /* Copy the window to the stack — memmove below would invalidate any
-       pointer into wins[], so we work from a local snapshot. */
-    win = *cur;
+    for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+        for (i = 0; i < spaces[j].nwin; i++) {
+            if (spaces[j].wins[i].window == w) {
+                src = &spaces[j];
+                /* Local snapshot — memmove below moves wins[] */
+                win = spaces[j].wins[i];
+                removed = i;
+                break;
+            }
+        }
+        if (src) break;
+    }
+    if (!src || win.workspace == idx) return;
 
     /* Remove from dwindle tree before memmove (leaf pointers would dangle) */
-    layout_remove(ws, win.window);
+    layout_remove(src, w);
+    memmove(&src->wins[removed], &src->wins[removed + 1],
+            (src->nwin - removed - 1) * sizeof(ManagedWindow));
+    src->nwin--;
+    rebuild_tiled(src);
 
-    int removed = -1;
-    for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].window == win.window) {
-            removed = i;
-            memmove(&ws->wins[i], &ws->wins[i + 1],
-                    (ws->nwin - i - 1) * sizeof(ManagedWindow));
-            ws->nwin--;
-            found = 1;
-            break;
-        }
-    }
-    if (!found) return;
-
-    rebuild_tiled(ws);
-
-    Workspace *target = &spaces[idx];
+    target = &spaces[idx];
     if (!wins_ensure_cap(target)) err(1, "wins_ensure_cap");
     win.workspace = idx;
 
@@ -347,19 +361,44 @@ move_to_workspace(void *arg)
     }
 
     target->wins[target->nwin++] = win;
-    target->focused = win.window;
+    target->focused = w;
 
     rebuild_tiled(target);
 
     /* Insert into dwindle tree on target workspace if in dwindle mode */
-    layout_insert(target, win.window);
+    layout_insert(target, w);
 
-    /* Sticky windows stay mapped on all workspaces */
-    if (!win.is_sticky)
-        XUnmapWindow(dpy, win.window);
+    {
+        long desktop = idx;
+        XChangeProperty(dpy, w, atom_net_wm_desktop, XA_CARDINAL, 32,
+                        PropModeReplace, (unsigned char *)&desktop, 1);
+    }
 
-    refocus_after_remove(ws, removed);
+    if (idx == cur_ws) {
+        XMapWindow(dpy, w);
+    } else if (!win.is_sticky) {
+        /* Sticky windows stay mapped on all workspaces */
+        XUnmapWindow(dpy, w);
+    }
+
+    /* Only refocus visible workspaces — never focus a hidden window */
+    if (src == curws())
+        refocus_after_remove(src, removed);
+    update_ewmh_client_list();
     retile_ws(curws());
+}
+
+void
+move_to_workspace(void *arg)
+{
+    int idx = (int)(long)arg;
+    Workspace *ws = curws();
+    ManagedWindow *cur;
+
+    if (idx == cur_ws) return;
+    cur = focused_mw(ws);
+    if (!cur) return;
+    move_window_to_workspace(cur->window, idx);
 }
 
 /* ---- window management ---- */
@@ -408,8 +447,28 @@ classify_window_type(Window w)
     return WIN_NORMAL;
 }
 
+/* Write _NET_WM_STATE from the ManagedWindow flags (minus urgency,
+   which is managed separately so focusing can clear it). */
+static void
+write_net_wm_state(ManagedWindow *mw)
+{
+    Atom states[6];
+    int nstates = 0;
+
+    if (mw->is_fullscreen)    states[nstates++] = atom_net_wm_state_full;
+    if (mw->is_above)         states[nstates++] = atom_net_wm_state_above;
+    if (mw->is_sticky)        states[nstates++] = atom_net_wm_state_sticky;
+    if (mw->is_below)         states[nstates++] = atom_net_wm_state_below;
+    if (mw->is_not_focusable) states[nstates++] = atom_net_wm_state_not_focusable;
+    if (nstates)
+        XChangeProperty(dpy, mw->window, atom_net_wm_state, XA_ATOM, 32,
+                        PropModeReplace, (unsigned char *)states, nstates);
+    else
+        XDeleteProperty(dpy, mw->window, atom_net_wm_state);
+}
+
 /* Read _NET_WM_STATE and set the corresponding ManagedWindow flags.
-   Also sets is_floating=1 for above/sticky windows. */
+   Also sets is_floating=1 for above/sticky/below windows. */
 static void
 read_net_wm_state(ManagedWindow *mw, Window w)
 {
@@ -439,8 +498,13 @@ read_net_wm_state(ManagedWindow *mw, Window w)
         } else if (states[i] == atom_net_wm_state_sticky) {
             mw->is_sticky = 1;
             mw->is_floating = 1;
+        } else if (states[i] == atom_net_wm_state_below) {
+            mw->is_below = 1;
+            mw->is_floating = 1;
         } else if (states[i] == atom_net_wm_state_not_focusable) {
             mw->is_not_focusable = 1;
+        } else if (states[i] == atom_net_wm_state_demands_attention) {
+            mw->urgent = 1;
         }
     }
     XFree(data);
@@ -539,12 +603,45 @@ manage_window(Window w)
         if (hints) {
             if (hints->flags & InputHint)
                 mw.input_hint = hints->input;
+            if (hints->flags & XUrgencyHint)
+                mw.urgent = 1;
             XFree(hints);
         }
     }
 
+    /* Cache WM_NORMAL_HINTS min/max size for floating clamp */
+    {
+        XSizeHints size_hints;
+        long supplied = 0;
+        if (XGetWMNormalHints(dpy, w, &size_hints, &supplied)) {
+            if (size_hints.flags & PMinSize) {
+                mw.min_w = size_hints.min_width;
+                mw.min_h = size_hints.min_height;
+            }
+            if (size_hints.flags & PMaxSize) {
+                mw.max_w = size_hints.max_width;
+                mw.max_h = size_hints.max_height;
+            }
+        }
+    }
+
+    /* Transient windows float centered over their parent */
+    int transient_placed = 0;
+    {
+        Window parent = None;
+        if (XGetTransientForHint(dpy, w, &parent) && parent != None) {
+            ManagedWindow *pmw = find_mw_any(parent);
+            mw.is_floating = 1;
+            if (pmw) {
+                mw.x = pmw->x + (pmw->width - mw.width) / 2;
+                mw.y = pmw->y + (pmw->height - mw.height) / 2;
+                transient_placed = 1;
+            }
+        }
+    }
+
     /* Center floating windows on current monitor */
-    if (mw.is_floating && !mw.is_fullscreen) {
+    if (mw.is_floating && !mw.is_fullscreen && !transient_placed) {
         Monitor *mon = curmon();
         mw.width = mw.width > mon->width ? mon->width : mw.width;
         mw.height = mw.height > mon->height ? mon->height : mw.height;
@@ -597,6 +694,14 @@ manage_window(Window w)
     if (mw.workspace == cur_ws || ws == &spaces[SCRATCHPAD_IDX]) {
         retile_ws(ws);
     }
+
+    /* Publish desktop membership and client list for pagers */
+    {
+        long desktop = mw.workspace;
+        XChangeProperty(dpy, w, atom_net_wm_desktop, XA_CARDINAL, 32,
+                        PropModeReplace, (unsigned char *)&desktop, 1);
+    }
+    update_ewmh_client_list();
 }
 
 /* Unmanage a window (destroyed or unmapped).  When force is true the
@@ -636,6 +741,7 @@ unmanage_window(Window w, int force)
             refocus_after_remove(ws, removed);
     }
 
+    update_ewmh_client_list();
     retile_deferred();
 }
 
@@ -759,6 +865,14 @@ handle_client_message(XClientMessageEvent *e)
         return;
     }
 
+    /* _NET_WM_DESKTOP: pager requests a workspace move */
+    if (e->message_type == atom_net_wm_desktop) {
+        long idx = e->data.l[0];
+        if (idx >= 0 && idx < NUM_WORKSPACES && find_mw_any(e->window))
+            move_window_to_workspace(e->window, (int)idx);
+        return;
+    }
+
     /* _NET_CLOSE_WINDOW */
     if (e->message_type == atom_net_close) {
         unmanage_window(e->window, 0);
@@ -853,17 +967,8 @@ toggle_fullscreen(void)
                           mon->width, mon->height);
         XRaiseWindow(dpy, w->window);
 
-        /* Build _NET_WM_STATE with fullscreen + existing flags */
-        {
-            Atom states[4];
-            int nstates = 0;
-            states[nstates++] = atom_net_wm_state_full;
-            if (w->is_above)    states[nstates++] = atom_net_wm_state_above;
-            if (w->is_sticky)   states[nstates++] = atom_net_wm_state_sticky;
-            if (w->is_not_focusable) states[nstates++] = atom_net_wm_state_not_focusable;
-            XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
-                            PropModeReplace, (unsigned char *)states, nstates);
-        }
+        /* Rebuild _NET_WM_STATE with fullscreen + existing flags */
+        write_net_wm_state(w);
     } else {
         w->is_floating = w->pre_fs_floating;
         XSetWindowBorderWidth(dpy, w->window, BORDER_WIDTH);
@@ -877,19 +982,8 @@ toggle_fullscreen(void)
             XMoveResizeWindow(dpy, w->window, w->x, w->y, w->width, w->height);
         }
 
-        /* Rebuild _NET_WM_STATE, preserving above/sticky/not_focusable */
-        {
-            Atom states[4];
-            int nstates = 0;
-            if (w->is_above)    states[nstates++] = atom_net_wm_state_above;
-            if (w->is_sticky)   states[nstates++] = atom_net_wm_state_sticky;
-            if (w->is_not_focusable) states[nstates++] = atom_net_wm_state_not_focusable;
-            if (nstates)
-                XChangeProperty(dpy, w->window, atom_net_wm_state, XA_ATOM, 32,
-                                PropModeReplace, (unsigned char *)states, nstates);
-            else
-                XDeleteProperty(dpy, w->window, atom_net_wm_state);
-        }
+        /* Rebuild _NET_WM_STATE, preserving above/sticky/below/not_focusable */
+        write_net_wm_state(w);
 
         retile_deferred();
     }
@@ -905,7 +999,7 @@ toggle_float(void)
 
     if (!w) return;
     if (w->is_fullscreen) return;
-    if (w->is_above || w->is_sticky) return;  /* always floating */
+    if (w->is_above || w->is_sticky || w->is_below) return;  /* always floating */
 
     if (!w->is_floating) {
         /* Save tiled geometry and position for snap-back */
@@ -1215,6 +1309,16 @@ spawn(void *arg)
 
 /* ---- X event handlers ---- */
 
+/* Clamp dimensions to the client's WM_NORMAL_HINTS min/max size. */
+static void
+apply_size_hints(ManagedWindow *mw, int *w, int *h)
+{
+    if (mw->min_w > 0 && *w < mw->min_w) *w = mw->min_w;
+    if (mw->min_h > 0 && *h < mw->min_h) *h = mw->min_h;
+    if (mw->max_w > 0 && *w > mw->max_w) *w = mw->max_w;
+    if (mw->max_h > 0 && *h > mw->max_h) *h = mw->max_h;
+}
+
 static void
 grab_mouse(ManagedWindow *mw, int resizing, XButtonEvent *e)
 {
@@ -1293,23 +1397,32 @@ handle_configure_request(XConfigureRequestEvent *e)
         return;
     }
 
-    /* Floating/unmanaged: honor all fields including stacking */
-    XWindowChanges wc;
-    wc.x = e->x;
-    wc.y = e->y;
-    wc.width = e->width;
-    wc.height = e->height;
-    wc.border_width = e->border_width;
-    wc.sibling = e->above;
-    wc.stack_mode = e->detail;
-    XConfigureWindow(dpy, e->window, e->value_mask, &wc);
+    /* Floating/unmanaged: honor all fields including stacking,
+       clamped to the client's size hints */
+    {
+        XWindowChanges wc;
+        int w = e->width, h = e->height;
+        int mask = e->value_mask;
 
-    /* Sync managed state after proxying floating configure */
-    if (mw) {
-        if (e->value_mask & CWX)      mw->x = e->x;
-        if (e->value_mask & CWY)      mw->y = e->y;
-        if (e->value_mask & CWWidth)  mw->width = e->width;
-        if (e->value_mask & CWHeight) mw->height = e->height;
+        if (mw && (mask & (CWWidth | CWHeight)))
+            apply_size_hints(mw, &w, &h);
+
+        wc.x = e->x;
+        wc.y = e->y;
+        wc.width = w;
+        wc.height = h;
+        wc.border_width = e->border_width;
+        wc.sibling = e->above;
+        wc.stack_mode = e->detail;
+        XConfigureWindow(dpy, e->window, mask, &wc);
+
+        /* Sync managed state to the (possibly clamped) values */
+        if (mw) {
+            if (mask & CWX)      mw->x = e->x;
+            if (mask & CWY)      mw->y = e->y;
+            if (mask & CWWidth)  mw->width = w;
+            if (mask & CWHeight) mw->height = h;
+        }
     }
 }
 
@@ -1489,6 +1602,7 @@ handle_motion_notify(XMotionEvent *e)
         int nh = mouse.orig_h + dy;
         if (nw < MIN_WIN_DIM) nw = MIN_WIN_DIM;
         if (nh < MIN_WIN_DIM) nh = MIN_WIN_DIM;
+        apply_size_hints(mw, &nw, &nh);
         mw->width = nw;
         mw->height = nh;
         XMoveResizeWindow(dpy, mw->window, mw->x, mw->y, nw, nh);
@@ -1527,12 +1641,16 @@ handle_property_notify(XPropertyEvent *e)
     unsigned char *data = NULL;
     int was_above = mw->is_above;
     int was_sticky = mw->is_sticky;
+    int was_below = mw->is_below;
     int was_fullscreen = mw->is_fullscreen;
+    int was_urgent = mw->urgent;
 
     mw->is_above = 0;
     mw->is_sticky = 0;
+    mw->is_below = 0;
     mw->is_not_focusable = 0;
     mw->is_fullscreen = 0;
+    mw->urgent = 0;
 
     if (XGetWindowProperty(dpy, e->window, atom_net_wm_state, 0, 32, False,
                            XA_ATOM, &actual, &fmt, &n, &remain,
@@ -1547,18 +1665,31 @@ handle_property_notify(XPropertyEvent *e)
                     mw->is_above = 1;
                 else if (states[si] == atom_net_wm_state_sticky)
                     mw->is_sticky = 1;
+                else if (states[si] == atom_net_wm_state_below)
+                    mw->is_below = 1;
                 else if (states[si] == atom_net_wm_state_not_focusable)
                     mw->is_not_focusable = 1;
+                else if (states[si] == atom_net_wm_state_demands_attention)
+                    mw->urgent = 1;
             }
         }
         XFree(data);
     }
 
-    if (mw->is_above || mw->is_sticky)
+    if (mw->is_above || mw->is_sticky || mw->is_below)
         mw->is_floating = 1;
 
     if (mw->is_above && !was_above)
         XRaiseWindow(dpy, mw->window);
+    if (mw->is_below && !was_below)
+        XLowerWindow(dpy, mw->window);
+
+    /* New urgency demand on an unfocused window: show the urgent border */
+    if (mw->urgent && !was_urgent) {
+        Workspace *aws = active_ws();
+        if (aws->focused != mw->window)
+            XSetWindowBorder(dpy, mw->window, URGENT_COLOR);
+    }
 
     if (mw->is_sticky && !was_sticky) {
         for (j = 0; j < NUM_WORKSPACES + 1; j++) {
@@ -1584,7 +1715,8 @@ handle_property_notify(XPropertyEvent *e)
         return;
     }
 
-    if (mw->is_above != was_above || mw->is_sticky != was_sticky)
+    if (mw->is_above != was_above || mw->is_sticky != was_sticky
+        || mw->is_below != was_below)
         retile_deferred();
 }
 

@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <stdio.h>
 #include <err.h>
 
 #define WS(n)                                                          \
@@ -53,8 +54,12 @@ Atom atom_net_wm_type_popup_menu;
 Atom atom_net_wm_type_menu;
 Atom atom_net_wm_state_above;
 Atom atom_net_wm_state_sticky;
+Atom atom_net_wm_state_below;
 Atom atom_net_wm_state_not_focusable;
 Atom atom_net_wm_state_hidden;
+Atom atom_net_wm_state_demands_attention;
+Atom atom_net_client_list;
+Atom atom_net_wm_desktop;
 Atom atom_net_close;
 
 /* ---- shell commands ---- */
@@ -128,7 +133,14 @@ const size_t num_keys = sizeof(keys) / sizeof(keys[0]);
 static int
 xerror(Display *d, XErrorEvent *ee)
 {
-    (void)d; (void)ee;
+    /* BadWindow races are routine (window died mid-request) — ignore.
+       Anything else is a real bug: log it instead of dying. */
+    if (ee->error_code == BadWindow)
+        return 0;
+    (void)d;
+    fprintf(stderr, "dswm: X error %d (request %d.%d) on 0x%lx\n",
+            ee->error_code, ee->request_code, ee->minor_code,
+            ee->resourceid);
     return 0;
 }
 
@@ -141,6 +153,21 @@ update_ewmh_current_desktop(void)
     long desktop = cur_ws;
     XChangeProperty(dpy, root, atom_net_current_desktop, XA_CARDINAL, 32,
                     PropModeReplace, (unsigned char *)&desktop, 1);
+}
+
+/* Publish all managed windows for pagers/taskbars. */
+void
+update_ewmh_client_list(void)
+{
+    Window wins[NUM_WORKSPACES * 64];
+    int n = 0, j, i;
+
+    for (j = 0; j < NUM_WORKSPACES + 1 && n < (int)NELEM(wins); j++) {
+        for (i = 0; i < spaces[j].nwin && n < (int)NELEM(wins); i++)
+            wins[n++] = spaces[j].wins[i].window;
+    }
+    XChangeProperty(dpy, root, atom_net_client_list, XA_WINDOW, 32,
+                    PropModeReplace, (unsigned char *)wins, n);
 }
 
 /* Write all supported EWMH atoms and initial desktop count at startup. */
@@ -169,8 +196,12 @@ setup_ewmh(void)
                         atom_net_wm_type_toolbar,
                         atom_net_wm_state_above,
                         atom_net_wm_state_sticky,
+                        atom_net_wm_state_below,
                         atom_net_wm_state_not_focusable,
-                    }, 16);
+                        atom_net_wm_state_demands_attention,
+                        atom_net_client_list,
+                        atom_net_wm_desktop,
+                    }, 20);
 
     update_ewmh_current_desktop();
     XDeleteProperty(dpy, root, atom_net_active_window);
@@ -204,8 +235,12 @@ cache_atoms(void)
     atom_net_wm_type_menu = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_MENU", False);
     atom_net_wm_state_above = XInternAtom(dpy, "_NET_WM_STATE_ABOVE", False);
     atom_net_wm_state_sticky = XInternAtom(dpy, "_NET_WM_STATE_STICKY", False);
+    atom_net_wm_state_below = XInternAtom(dpy, "_NET_WM_STATE_BELOW", False);
     atom_net_wm_state_not_focusable = XInternAtom(dpy, "_NET_WM_STATE_NOT_FOCUSABLE", False);
     atom_net_wm_state_hidden = XInternAtom(dpy, "_NET_WM_STATE_HIDDEN", False);
+    atom_net_wm_state_demands_attention = XInternAtom(dpy, "_NET_WM_STATE_DEMANDS_ATTENTION", False);
+    atom_net_client_list = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
+    atom_net_wm_desktop = XInternAtom(dpy, "_NET_WM_DESKTOP", False);
     atom_net_close = XInternAtom(dpy, "_NET_CLOSE_WINDOW", False);
 }
 

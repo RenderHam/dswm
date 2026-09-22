@@ -469,16 +469,20 @@ fit_window(void)
    collapse into a single retile.  retile_deferred() sets a flag;
    flush_retile() (called once per event) performs the actual layout. */
 
-/* Raise all floating windows above tiled.  Also called from focus paths
-   and resize/move handlers to keep floating above tiled at all times.
-   Order: regular floating first, then above/sticky on top. */
+/* Maintain layer order: below-layer windows sink underneath tiled,
+   regular floating goes above tiled, above/sticky on top of those. */
 void
 raise_above_windows(Workspace *ws)
 {
     int i;
     for (i = 0; i < ws->nwin; i++) {
+        if (ws->wins[i].is_below)
+            XLowerWindow(dpy, ws->wins[i].window);
+    }
+    for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].is_floating && !ws->wins[i].is_fullscreen &&
-            !ws->wins[i].is_above && !ws->wins[i].is_sticky)
+            !ws->wins[i].is_above && !ws->wins[i].is_sticky &&
+            !ws->wins[i].is_below)
             XRaiseWindow(dpy, ws->wins[i].window);
     }
     for (i = 0; i < ws->nwin; i++) {

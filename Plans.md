@@ -43,13 +43,13 @@
 
 ## Phase C — spec parity (pick subset)
 
-- [ ] C1. `_NET_WM_STATE_BELOW` / layer-below (bspwm `stack.c:123-133`).
-- [ ] C2. `_NET_CLIENT_LIST` maintenance for pagers/taskbars.
-- [ ] C3. `_NET_WM_DESKTOP` handling.
-- [ ] C4. Urgency (`WM_HINTS` / `DEMANDS_ATTENTION`).
-- [ ] C5. Size hints (`WM_NORMAL_HINTS`) for floating resize.
-- [ ] C6. `WM_TRANSIENT_FOR` (dialogs above parent).
-- [ ] C7. Error logging: ignore `BadWindow`, warn on the rest.
+- [x] C1. `_NET_WM_STATE_BELOW` / layer-below (bspwm `stack.c:123-133`).
+- [x] C2. `_NET_CLIENT_LIST` maintenance for pagers/taskbars.
+- [x] C3. `_NET_WM_DESKTOP` handling.
+- [x] C4. Urgency (`WM_HINTS` / `DEMANDS_ATTENTION`).
+- [x] C5. Size hints (`WM_NORMAL_HINTS`) for floating resize.
+- [x] C6. `WM_TRANSIENT_FOR` (dialogs above parent).
+- [x] C7. Error logging: ignore `BadWindow`, warn on the rest.
 
 ## Phase D — simplify
 
@@ -64,3 +64,4 @@
 - 2026-09-23: Phase A done. Zero warnings. Not committed per user request.
 - 2026-09-23: Phase B partial (B1/B3/B4) done. Zero warnings. B2 pending user decision.
 - 2026-09-23: Phase B complete (B2 explicit-focus raise). Zero warnings. Not committed per user request.
+- 2026-09-23: Phase C complete (C1-C7). Zero warnings. Not committed per user request.

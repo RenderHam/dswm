@@ -18,6 +18,7 @@
 #define BORDER_WIDTH       3
 #define BORDER_COLOR       0x181818
 #define FOCUS_COLOR        0x005577
+#define URGENT_COLOR       0xCC4400
 #define DIM_COLOR          0x000000CC  /* RRGGBBAA — alpha baked into pixel */
 
 #define GAP_OUTER          10
@@ -67,15 +68,19 @@ struct ManagedWindow {
     int pre_fs_floating : 1;
     int is_above       : 1;  /* _NET_WM_STATE_ABOVE — always raised */
     int is_sticky      : 1;  /* _NET_WM_STATE_STICKY — visible all workspaces */
+    int is_below       : 1;  /* _NET_WM_STATE_BELOW — always lowered */
     int is_not_focusable : 1; /* _NET_WM_STATE_NOT_FOCUSABLE */
     int input_hint        : 1; /* ICCCM WM_HINTS input field */
     int monocle_hidden    : 1; /* unmapped by monocle, not withdrawn */
+    int urgent            : 1; /* WM_HINTS urgency or DEMANDS_ATTENTION */
     int workspace      : 4;
     int monitor        : 3;
     /* cold fields: only on fullscreen toggle / save-restore */
     float saved_factor;
     int pre_fs_x, pre_fs_y, pre_fs_w, pre_fs_h;
     int pre_float_idx;
+    int min_w, min_h;   /* WM_NORMAL_HINTS minimum size (0 = unset) */
+    int max_w, max_h;   /* WM_NORMAL_HINTS maximum size (0 = unset) */
 };
 
 /* ---- dwindle tree node ---- */
@@ -228,8 +233,12 @@ extern Atom atom_net_wm_type_popup_menu;
 extern Atom atom_net_wm_type_menu;
 extern Atom atom_net_wm_state_above;
 extern Atom atom_net_wm_state_sticky;
+extern Atom atom_net_wm_state_below;
 extern Atom atom_net_wm_state_not_focusable;
 extern Atom atom_net_wm_state_hidden;
+extern Atom atom_net_wm_state_demands_attention;
+extern Atom atom_net_client_list;
+extern Atom atom_net_wm_desktop;
 extern Atom atom_net_close;
 
 /* ---- globals (owned by layout.c) ---- */
@@ -324,6 +333,7 @@ void handle_client_message(XClientMessageEvent *e);
 /* ---- main.c prototypes ---- */
 
 void update_ewmh_current_desktop(void);
+void update_ewmh_client_list(void);
 void setup_ewmh(void);
 void cache_atoms(void);
 void monitors_init(void);
