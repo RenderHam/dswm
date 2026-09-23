@@ -35,7 +35,9 @@ Window scratch_saved_focus;
 Atom atom_wm_delete;
 Atom atom_wm_protocols;
 Atom atom_wm_take_focus;
+Atom atom_motif_wm_hints;
 Atom atom_net_wm_strut;
+Atom atom_net_wm_strut_partial;
 Atom atom_net_wm_state;
 Atom atom_net_wm_state_full;
 Atom atom_net_current_desktop;
@@ -60,6 +62,8 @@ Atom atom_net_wm_state_hidden;
 Atom atom_net_wm_state_demands_attention;
 Atom atom_net_client_list;
 Atom atom_net_wm_desktop;
+Atom atom_net_workarea;
+Atom atom_net_frame_extents;
 Atom atom_net_close;
 
 /* ---- shell commands ---- */
@@ -168,6 +172,41 @@ update_ewmh_client_list(void)
                     PropModeReplace, (unsigned char *)wins, n);
 }
 
+/* Publish per-monitor usable areas for pagers/panels.  Cached — the
+   XChangeProperty round-trip only happens when something changed. */
+void
+update_ewmh_workarea(void)
+{
+    static long last[MAX_MONS * 4];
+    static int last_nmons = -1;
+    long area[MAX_MONS * 4];
+    int i, changed = 0;
+
+    if (nmons != last_nmons)
+        changed = 1;
+    for (i = 0; i < nmons && i < MAX_MONS; i++) {
+        int w, h, x, y;
+        monitor_usable_area(&mons[i], &w, &h, &x, &y);
+        area[i * 4 + 0] = x;
+        area[i * 4 + 1] = y;
+        area[i * 4 + 2] = w;
+        area[i * 4 + 3] = h;
+        if (!changed
+            && (area[i * 4 + 0] != last[i * 4 + 0]
+                || area[i * 4 + 1] != last[i * 4 + 1]
+                || area[i * 4 + 2] != last[i * 4 + 2]
+                || area[i * 4 + 3] != last[i * 4 + 3]))
+            changed = 1;
+    }
+    if (!changed) return;
+
+    for (i = 0; i < nmons * 4 && i < MAX_MONS * 4; i++)
+        last[i] = area[i];
+    last_nmons = nmons;
+    XChangeProperty(dpy, root, atom_net_workarea, XA_CARDINAL, 32,
+                    PropModeReplace, (unsigned char *)area, nmons * 4);
+}
+
 /* Write all supported EWMH atoms and initial desktop count at startup. */
 void
 setup_ewmh(void)
@@ -199,7 +238,9 @@ setup_ewmh(void)
                         atom_net_wm_state_demands_attention,
                         atom_net_client_list,
                         atom_net_wm_desktop,
-                    }, 20);
+                        atom_net_workarea,
+                        atom_net_frame_extents,
+                    }, 22);
 
     update_ewmh_current_desktop();
     XDeleteProperty(dpy, root, atom_net_active_window);
@@ -214,7 +255,9 @@ cache_atoms(void)
     atom_wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     atom_wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
     atom_wm_take_focus = XInternAtom(dpy, "WM_TAKE_FOCUS", False);
+    atom_motif_wm_hints = XInternAtom(dpy, "_MOTIF_WM_HINTS", False);
     atom_net_wm_strut = XInternAtom(dpy, "_NET_WM_STRUT", False);
+    atom_net_wm_strut_partial = XInternAtom(dpy, "_NET_WM_STRUT_PARTIAL", False);
     atom_net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
     atom_net_wm_state_full = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
     atom_net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
@@ -239,6 +282,8 @@ cache_atoms(void)
     atom_net_wm_state_demands_attention = XInternAtom(dpy, "_NET_WM_STATE_DEMANDS_ATTENTION", False);
     atom_net_client_list = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
     atom_net_wm_desktop = XInternAtom(dpy, "_NET_WM_DESKTOP", False);
+    atom_net_workarea = XInternAtom(dpy, "_NET_WORKAREA", False);
+    atom_net_frame_extents = XInternAtom(dpy, "_NET_FRAME_EXTENTS", False);
     atom_net_close = XInternAtom(dpy, "_NET_CLOSE_WINDOW", False);
 }
 

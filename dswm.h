@@ -73,6 +73,7 @@ struct ManagedWindow {
     int input_hint        : 1; /* ICCCM WM_HINTS input field */
     int monocle_hidden    : 1; /* unmapped by monocle, not withdrawn */
     int urgent            : 1; /* WM_HINTS urgency or DEMANDS_ATTENTION */
+    int borderless        : 1; /* _MOTIF_WM_HINTS decorations == 0 */
     int workspace      : 4;
     int monitor        : 3;
     /* cold fields: only on fullscreen toggle / save-restore */
@@ -215,7 +216,9 @@ extern Window scratch_saved_focus;
 extern Atom atom_wm_delete;
 extern Atom atom_wm_protocols;
 extern Atom atom_wm_take_focus;
+extern Atom atom_motif_wm_hints;
 extern Atom atom_net_wm_strut;
+extern Atom atom_net_wm_strut_partial;
 extern Atom atom_net_wm_state;
 extern Atom atom_net_wm_state_full;
 extern Atom atom_net_current_desktop;
@@ -240,6 +243,8 @@ extern Atom atom_net_wm_state_hidden;
 extern Atom atom_net_wm_state_demands_attention;
 extern Atom atom_net_client_list;
 extern Atom atom_net_wm_desktop;
+extern Atom atom_net_workarea;
+extern Atom atom_net_frame_extents;
 extern Atom atom_net_close;
 
 /* ---- globals (owned by layout.c) ---- */
@@ -267,6 +272,7 @@ int focus_candidate(ManagedWindow *mw);
 int window_exists(Window w);
 
 void update_camera_ws(Workspace *ws);
+void monitor_usable_area(Monitor *mon, int *w, int *h, int *x, int *y);
 void raise_above_windows(Workspace *ws);
 void tile_horizontal_ws(Workspace *ws);
 void retile_ws(Workspace *ws);
@@ -333,6 +339,7 @@ void handle_client_message(XClientMessageEvent *e);
 
 void update_ewmh_current_desktop(void);
 void update_ewmh_client_list(void);
+void update_ewmh_workarea(void);
 void setup_ewmh(void);
 void cache_atoms(void);
 void monitors_init(void);

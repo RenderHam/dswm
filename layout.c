@@ -94,18 +94,72 @@ rebuild_tiled(Workspace *ws)
 
 /* ---- bar strut support ---- */
 
-/* Read _NET_WM_STRUT from windows on the current workspace AND from
-   unmanaged root children (e.g. polybar docks).  Struts are reserved
-   screen edges that tiled windows must avoid.  Results are cached in
-   mon->strut_* and invalidated on window add/remove via strut_valid. */
+/* Fold one strut into the monitor reservation.  Ranges are root-relative
+   (matching _NET_WM_STRUT_PARTIAL semantics): an edge only counts when
+   its range overlaps the monitor. */
 static void
-compute_struts(Monitor *mon)
+accumulate_strut(Monitor *mon, long left, long right, long top, long bottom,
+                 long lsy, long ley, long rsy, long rey,
+                 long tsx, long tex, long bsx, long bex)
 {
-    Workspace *ws = curws();
+    if (left > 0 && ley >= mon->y && lsy < mon->y + mon->height)
+        if (left > mon->strut_left) mon->strut_left = left;
+    if (right > 0 && rey >= mon->y && rsy < mon->y + mon->height)
+        if (right > mon->strut_right) mon->strut_right = right;
+    if (top > 0 && tex >= mon->x && tsx < mon->x + mon->width)
+        if (top > mon->strut_top) mon->strut_top = top;
+    if (bottom > 0 && bex >= mon->x && bsx < mon->x + mon->width)
+        if (bottom > mon->strut_bottom) mon->strut_bottom = bottom;
+}
+
+/* Read one window's strut into the monitor reservation, preferring
+   _NET_WM_STRUT_PARTIAL (thickness + ranges) over the legacy 4-element
+   _NET_WM_STRUT.  wx/wy/ww/wh locate the window for legacy fallback. */
+static void
+read_window_strut(Monitor *mon, Window w, int wx, int wy, int ww, int wh)
+{
     Atom actual;
     int format;
     unsigned long nitems, bytes_after;
     unsigned char *data = NULL;
+
+    if (XGetWindowProperty(dpy, w, atom_net_wm_strut_partial,
+                           0, 12, False, XA_CARDINAL, &actual, &format,
+                           &nitems, &bytes_after, &data) == Success
+        && data && actual == XA_CARDINAL && format == 32 && nitems >= 12) {
+        long *s = (long *)data;
+        accumulate_strut(mon, s[0], s[1], s[2], s[3],
+                         s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11]);
+        XFree(data);
+        return;
+    }
+    if (data) {
+        XFree(data);
+        data = NULL;
+    }
+
+    if (XGetWindowProperty(dpy, w, atom_net_wm_strut,
+                           0, 4, False, XA_CARDINAL, &actual, &format,
+                           &nitems, &bytes_after, &data) == Success
+        && data && actual == XA_CARDINAL && format == 32 && nitems >= 4) {
+        long *s = (long *)data;
+        /* Legacy struts carry no ranges: use the window rect as the span */
+        accumulate_strut(mon, s[0], s[1], s[2], s[3],
+                         wy, wy + wh, wy, wy + wh,
+                         wx, wx + ww, wx, wx + ww);
+    }
+    if (data) XFree(data);
+}
+
+/* Read struts from windows on the current workspace AND from unmanaged
+   root children (docks, bars, desktop widgets).  Struts are reserved
+   screen edges that tiled windows must avoid.  Results are cached in
+   mon->strut_* and invalidated via strut_valid on window add/remove
+   and on strut property changes. */
+static void
+compute_struts(Monitor *mon)
+{
+    Workspace *ws = curws();
     int i;
 
     if (mon->strut_valid) return;
@@ -117,26 +171,12 @@ compute_struts(Monitor *mon)
 
     /* Check managed windows on current workspace */
     for (i = 0; i < ws->nwin; i++) {
-        if (XGetWindowProperty(dpy, ws->wins[i].window, atom_net_wm_strut,
-                               0, 4, False, XA_CARDINAL, &actual, &format,
-                               &nitems, &bytes_after, &data) == Success) {
-            if (data && actual == XA_CARDINAL && format == 32 && nitems >= 4) {
-                long *strut = (long *)data;
-                if (strut[0] > 0 && ws->wins[i].x + ws->wins[i].width > mon->x)
-                    if (strut[0] > mon->strut_left) mon->strut_left = strut[0];
-                if (strut[1] > 0 && ws->wins[i].x < mon->x + mon->width)
-                    if (strut[1] > mon->strut_right) mon->strut_right = strut[1];
-                if (strut[2] > 0 && ws->wins[i].y + ws->wins[i].height > mon->y)
-                    if (strut[2] > mon->strut_top) mon->strut_top = strut[2];
-                if (strut[3] > 0 && ws->wins[i].y < mon->y + mon->height)
-                    if (strut[3] > mon->strut_bottom) mon->strut_bottom = strut[3];
-            }
-            if (data) XFree(data);
-            data = NULL;
-        }
+        read_window_strut(mon, ws->wins[i].window,
+                          ws->wins[i].x, ws->wins[i].y,
+                          ws->wins[i].width, ws->wins[i].height);
     }
 
-    /* Also check unmanaged root children (WIN_SKIP docks like polybar) */
+    /* Also check unmanaged root children (docks, bars, widgets) */
     {
         Window root_ret, parent_ret, *children = NULL;
         unsigned int nchildren = 0;
@@ -145,25 +185,8 @@ compute_struts(Monitor *mon)
                 XWindowAttributes wa;
                 if (!XGetWindowAttributes(dpy, children[i], &wa)) continue;
                 if (wa.map_state != IsViewable) continue;
-
-                if (XGetWindowProperty(dpy, children[i], atom_net_wm_strut,
-                                       0, 4, False, XA_CARDINAL, &actual,
-                                       &format, &nitems, &bytes_after,
-                                       &data) == Success) {
-                    if (data && actual == XA_CARDINAL && format == 32 && nitems >= 4) {
-                        long *strut = (long *)data;
-                        if (strut[0] > 0 && wa.x + wa.width > mon->x)
-                            if (strut[0] > mon->strut_left) mon->strut_left = strut[0];
-                        if (strut[1] > 0 && wa.x < mon->x + mon->width)
-                            if (strut[1] > mon->strut_right) mon->strut_right = strut[1];
-                        if (strut[2] > 0 && wa.y + wa.height > mon->y)
-                            if (strut[2] > mon->strut_top) mon->strut_top = strut[2];
-                        if (strut[3] > 0 && wa.y < mon->y + mon->height)
-                            if (strut[3] > mon->strut_bottom) mon->strut_bottom = strut[3];
-                    }
-                    if (data) XFree(data);
-                    data = NULL;
-                }
+                read_window_strut(mon, children[i],
+                                  wa.x, wa.y, wa.width, wa.height);
             }
             if (children) XFree(children);
         }
@@ -187,6 +210,14 @@ compute_usable_area(Monitor *mon, int *usable_w, int *usable_h,
 
     if (*usable_h < MIN_WIN_DIM) *usable_h = mon->height;
     if (*usable_w < MIN_WIN_DIM) *usable_w = mon->width;
+}
+
+/* Exported wrapper so EWMH workarea publishing can reuse strut math. */
+void
+monitor_usable_area(Monitor *mon, int *usable_w, int *usable_h,
+                    int *x_start, int *y_start)
+{
+    compute_usable_area(mon, usable_w, usable_h, x_start, y_start);
 }
 
 /* ---- tiling: horizontal scroll layout (infinite canvas) ---- */
@@ -396,6 +427,7 @@ retile_ws(Workspace *ws)
     else
         dwindle_arrange(ws, mon);
     raise_above_windows(ws);
+    update_ewmh_workarea();
 }
 
 void

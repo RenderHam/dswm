@@ -60,6 +60,28 @@
 - [x] D3. `FIT_WINDOW`/width-factor vs dwindle-resize duality review.
 - [x] D4. Fold scattered `XRaiseWindow` loops into one `restack_workspace` helper.
 
+## EWMH completeness (post-D, standalone)
+
+- [x] `_NET_WORKAREA`: per-monitor usable rects via new `monitor_usable_area()`
+  export, change-cached, refreshed on every `retile_ws()`, advertised.
+- [x] `_NET_FRAME_EXTENTS`: border widths published per window at manage, advertised.
+- `_NET_SHOWING_DESKTOP` skipped — no such mode.
+
+## Widget respect (bspwm parity for KyuteWidgets)
+
+- [x] W1. Keep client geometry for positioned floaters — center only when
+  the client left the window at the origin (bspwm's rule); widgets and
+  popups stay where they asked.
+- [x] W2. Honor `_MOTIF_WM_HINTS` decorations=0 → border width 0, stored
+  per-window (`borderless`), respected by manage and fullscreen restore.
+- [x] W3. Lower WIN_SKIP desktop/dock on map — new `WIN_PINNED` class
+  (`XMapWindow` + `XLowerWindow`); splash/notification stay map-only.
+- [x] W4. Strut PARTIAL + live invalidation — `atom_net_wm_strut_partial`
+  cached, preferred over legacy with root-relative range-vs-monitor
+  overlap; legacy falls back using the window rect as span; strut
+  `PropertyNotify` invalidates all monitors + retiles. Ranges still
+  collapse to full-edge reservation (single usable rect per monitor).
+
 ## Log
 
 - 2026-09-23: Plan written. Starting Phase A.
@@ -68,3 +90,5 @@
 - 2026-09-23: Phase B complete (B2 explicit-focus raise). Zero warnings. Not committed per user request.
 - 2026-09-23: Phase C complete (C1-C7). Zero warnings. Not committed per user request.
 - 2026-09-23: Phase D complete (D1-D4). Zero warnings. Not committed per user request.
+- 2026-09-23: EWMH completeness (workarea + frame extents). Zero warnings. Not committed per user request.
+- 2026-09-24: Widget respect W1-W4 (geometry, Motif borders, pinned lower, strut partial). Zero warnings. Not committed per user request.

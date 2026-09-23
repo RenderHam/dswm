@@ -398,12 +398,13 @@ move_to_workspace(void *arg)
 /* ---- window management ---- */
 
 /* Window type classification results. */
-#define WIN_SKIP     0  /* map only, don't manage (desktop/dock/splash/etc.) */
-#define WIN_NORMAL   1  /* manage + tile */
-#define WIN_DIALOG   2  /* manage + auto-float at requested position */
+#define WIN_SKIP     0  /* map only, don't manage (splash/notification/etc.) */
+#define WIN_PINNED   1  /* map + lower, don't manage (desktop/dock widgets) */
+#define WIN_NORMAL   2  /* manage + tile */
+#define WIN_DIALOG   3  /* manage + auto-float at requested position */
 
 /* Classify a window by its _NET_WM_WINDOW_TYPE property.
-   Returns WIN_SKIP, WIN_NORMAL, or WIN_DIALOG. */
+   Returns WIN_SKIP, WIN_PINNED, WIN_NORMAL, or WIN_DIALOG. */
 static int
 classify_window_type(Window w)
 {
@@ -419,8 +420,10 @@ classify_window_type(Window w)
             Atom type = *(Atom *)data;
             XFree(data);
             if (type == atom_net_wm_type_desktop ||
-                type == atom_net_wm_type_dock ||
-                type == atom_net_wm_type_splash ||
+                type == atom_net_wm_type_dock) {
+                return WIN_PINNED;
+            }
+            if (type == atom_net_wm_type_splash ||
                 type == atom_net_wm_type_notification ||
                 type == atom_net_wm_type_popup_menu ||
                 type == atom_net_wm_type_menu) {
@@ -571,6 +574,12 @@ manage_window(Window w)
         XMapWindow(dpy, w);
         return;
     }
+    if (win_type == WIN_PINNED) {
+        /* Desktop/dock widgets live underneath everything managed */
+        XMapWindow(dpy, w);
+        XLowerWindow(dpy, w);
+        return;
+    }
 
     memset(&mw, 0, sizeof(mw));
     mw.window = w;
@@ -601,6 +610,23 @@ manage_window(Window w)
                 mw.urgent = 1;
             XFree(hints);
         }
+    }
+
+    /* Honor _MOTIF_WM_HINTS decorations=0 (widgets, splash screens) */
+    {
+        Atom actual;
+        int fmt;
+        unsigned long n, remain;
+        unsigned char *data = NULL;
+        if (XGetWindowProperty(dpy, w, atom_motif_wm_hints, 0, 5, False,
+                               atom_motif_wm_hints, &actual, &fmt,
+                               &n, &remain, &data) == Success
+            && data && actual == atom_motif_wm_hints && fmt == 32 && n >= 3) {
+            long *motif = (long *)data;
+            if ((motif[0] & (1L << 1)) && motif[2] == 0)
+                mw.borderless = 1;
+        }
+        if (data) XFree(data);
     }
 
     /* Cache WM_NORMAL_HINTS min/max size for floating clamp */
@@ -634,13 +660,17 @@ manage_window(Window w)
         }
     }
 
-    /* Center floating windows on current monitor */
+    /* Clamp oversized floating windows, but keep client geometry:
+       only center windows the client left at the origin (e.g. dialogs).
+       Positioned clients (widgets, popups) stay where they asked. */
     if (mw.is_floating && !mw.is_fullscreen && !transient_placed) {
         Monitor *mon = curmon();
         mw.width = mw.width > mon->width ? mon->width : mw.width;
         mw.height = mw.height > mon->height ? mon->height : mw.height;
-        mw.x = mon->x + (mon->width - mw.width) / 2;
-        mw.y = mon->y + (mon->height - mw.height) / 2;
+        if (mw.x == 0 && mw.y == 0) {
+            mw.x = mon->x + (mon->width - mw.width) / 2;
+            mw.y = mon->y + (mon->height - mw.height) / 2;
+        }
     }
 
     insert_idx = insert_into_workspace(ws, mw);
@@ -654,7 +684,7 @@ manage_window(Window w)
     }
 
     XSelectInput(dpy, w, EnterWindowMask | StructureNotifyMask | PropertyChangeMask);
-    XSetWindowBorderWidth(dpy, w, BORDER_WIDTH);
+    XSetWindowBorderWidth(dpy, w, mw.borderless ? 0 : BORDER_WIDTH);
 
     /* Position floating windows before mapping to avoid one-frame jump */
     if (mw.is_floating && !mw.is_fullscreen) {
@@ -689,11 +719,15 @@ manage_window(Window w)
         retile_ws(ws);
     }
 
-    /* Publish desktop membership and client list for pagers */
+    /* Publish desktop membership, frame extents, client list for pagers */
     {
         long desktop = mw.workspace;
+        long extents[4] = { BORDER_WIDTH, BORDER_WIDTH,
+                            BORDER_WIDTH, BORDER_WIDTH };
         XChangeProperty(dpy, w, atom_net_wm_desktop, XA_CARDINAL, 32,
                         PropModeReplace, (unsigned char *)&desktop, 1);
+        XChangeProperty(dpy, w, atom_net_frame_extents, XA_CARDINAL, 32,
+                        PropModeReplace, (unsigned char *)extents, 4);
     }
     update_ewmh_client_list();
 }
@@ -965,7 +999,7 @@ toggle_fullscreen(void)
         write_net_wm_state(w);
     } else {
         w->is_floating = w->pre_fs_floating;
-        XSetWindowBorderWidth(dpy, w->window, BORDER_WIDTH);
+        XSetWindowBorderWidth(dpy, w->window, w->borderless ? 0 : BORDER_WIDTH);
 
         /* Restore floating geometry or let retile recompute for tiled */
         if (w->pre_fs_floating) {
@@ -1623,6 +1657,15 @@ handle_property_notify(XPropertyEvent *e)
     Workspace *ws;
     ManagedWindow *mw = NULL;
     int i, j;
+
+    /* Strut changes (docks, bars, widgets): drop cached reservations,
+       retile everything against the new usable areas. */
+    if (e->atom == atom_net_wm_strut || e->atom == atom_net_wm_strut_partial) {
+        for (j = 0; j < nmons; j++)
+            mons[j].strut_valid = 0;
+        retile_deferred();
+        return;
+    }
 
     if (e->atom != atom_net_wm_state) return;
 
