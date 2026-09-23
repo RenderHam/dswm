@@ -73,6 +73,39 @@ focused_mw(Workspace *ws)
     return find_mw(ws, ws->focused);
 }
 
+/* Track an unmanaged overlay window (replaces any existing entry).
+   Excess windows beyond MAX_OVERLAYS are left untracked. */
+static void
+overlay_add(Window w, int topmost)
+{
+    int i;
+    for (i = 0; i < noverlays; i++) {
+        if (overlays[i].window == w) {
+            overlays[i].topmost = topmost;
+            return;
+        }
+    }
+    if (noverlays >= MAX_OVERLAYS) return;
+    overlays[noverlays].window = w;
+    overlays[noverlays].topmost = topmost;
+    noverlays++;
+}
+
+/* Drop an unmanaged overlay window from tracking. */
+static void
+overlay_remove(Window w)
+{
+    int i;
+    for (i = 0; i < noverlays; i++) {
+        if (overlays[i].window == w) {
+            memmove(&overlays[i], &overlays[i + 1],
+                    (noverlays - i - 1) * sizeof(Overlay));
+            noverlays--;
+            return;
+        }
+    }
+}
+
 /* Whether a window can receive keyboard-cycle focus.  Fullscreen and
    monocle-hidden windows are skipped (they're not visible/interactive). */
 int
@@ -288,8 +321,13 @@ show_workspace(int idx, int visible)
             XUnmapWindow(dpy, ws->wins[i].window);
     }
 
-    /* Keep scratchpad overlay raised above the newly mapped workspace */
-    if (visible && scratch_visible)
+    if (!visible) return;
+
+    /* Freshly mapped windows stacked on top: restore layer order for
+       sticky survivors, overlays and current-ws layers, then keep the
+       scratchpad overlay topmost. */
+    restack_visible();
+    if (scratch_visible)
         scratch_raise_all();
 }
 
@@ -380,6 +418,8 @@ move_window_to_workspace(Window w, int idx)
         refocus_after_remove(src, removed);
     update_ewmh_client_list();
     retile_ws(curws());
+    /* Mapping onto the visible workspace may have covered survivors */
+    restack_visible();
 }
 
 void
@@ -570,14 +610,17 @@ manage_window(Window w)
     if (wa.override_redirect) return;
 
     win_type = classify_window_type(w);
-    if (win_type == WIN_SKIP) {
+    if (win_type == WIN_SKIP || win_type == WIN_PINNED) {
+        /* Unmanaged widgets/popups: track layer intent from EWMH state so
+           workspace switches can preserve it (see restack_visible). */
+        ManagedWindow tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        read_net_wm_state(&tmp, w);
+        overlay_add(w, tmp.is_above || tmp.is_sticky);
         XMapWindow(dpy, w);
-        return;
-    }
-    if (win_type == WIN_PINNED) {
         /* Desktop/dock widgets live underneath everything managed */
-        XMapWindow(dpy, w);
-        XLowerWindow(dpy, w);
+        if (win_type == WIN_PINNED)
+            XLowerWindow(dpy, w);
         return;
     }
 
@@ -717,6 +760,8 @@ manage_window(Window w)
 
     if (mw.workspace == cur_ws || ws == &spaces[SCRATCHPAD_IDX]) {
         retile_ws(ws);
+        /* New window mapped on top: restore survivor + overlay layers */
+        restack_visible();
     }
 
     /* Publish desktop membership, frame extents, client list for pagers */
@@ -1386,6 +1431,7 @@ handle_map_request(XMapRequestEvent *e)
 void
 handle_destroy_notify(XDestroyWindowEvent *e)
 {
+    overlay_remove(e->window);
     unmanage_window(e->window, 1);
 }
 
@@ -1744,12 +1790,13 @@ handle_property_notify(XPropertyEvent *e)
         }
     }
 
+    /* Un-stickied window belongs to its home workspace only.  It is one
+       window, so unmap only when the home workspace isn't visible —
+       otherwise the UnmapNotify would unmanage it out from under us. */
     if (!mw->is_sticky && was_sticky) {
-        for (j = 0; j < NUM_WORKSPACES + 1; j++) {
-            if (j == cur_ws) continue;
-            if (j == mw->workspace) continue;
+        if (mw->workspace != cur_ws)
             XUnmapWindow(dpy, mw->window);
-        }
+        retile_deferred();
     }
 
     /* Handle fullscreen state change from client */

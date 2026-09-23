@@ -82,6 +82,30 @@
   `PropertyNotify` invalidates all monitors + retiles. Ranges still
   collapse to full-edge reservation (single usable rect per monitor).
 
+## Layer reset on workspace switch (widget above/sticky burial)
+
+Root cause: `XMapWindow` stacks on top, so showing a workspace buries
+anything that stayed mapped (other-ws sticky, unmanaged widgets, pinned
+docks), while `raise_above_windows` only reordered the current workspace.
+Scroll path verified clean (zero map/unmap/restack calls) — burial happens
+at map time and is noticed later.
+
+- [x] L1. Global `restack_visible()` (layout.c): below sinks, current-ws
+  layers via `raise_above_windows`, cross-ws sticky/above re-raised,
+  tracked overlays re-raised (topmost) / re-lowered (pinned).
+- [x] L2. Hooked into every map path: `show_workspace` (visible),
+  `dwindle_unhide_all` (only when something unhid), `move_window_to_workspace`,
+  `manage_window`. Scratchpad overlay still raised last (stays topmost).
+- [x] L3. Overlay tracking for unmanaged widgets: `Overlay` table
+  (`MAX_OVERLAYS`), layer intent read from `_NET_WM_STATE` at map,
+  pruned on `DestroyNotify`, replaced on re-map.
+- [x] L4. Un-sticky fix: unmap only when home workspace isn't visible
+  (old loop unmapped the single window globally, and the resulting
+  `UnmapNotify` unmanaged it out from under the WM).
+- Known tradeoff: overlay-topmost notifications raise above managed
+  fullscreen (OSD semantics); stale overlay entries (hidden without
+  destroy) make `XRaiseWindow` a harmless no-op until pruned.
+
 ## Log
 
 - 2026-09-23: Plan written. Starting Phase A.
@@ -92,3 +116,4 @@
 - 2026-09-23: Phase D complete (D1-D4). Zero warnings. Not committed per user request.
 - 2026-09-23: EWMH completeness (workarea + frame extents). Zero warnings. Not committed per user request.
 - 2026-09-24: Widget respect W1-W4 (geometry, Motif borders, pinned lower, strut partial). Zero warnings. Not committed per user request.
+- 2026-09-24: Layer reset L1-L4 (global restack, overlay tracking, un-sticky fix). Zero warnings. Not committed per user request.

@@ -116,6 +116,19 @@ typedef struct {
     int orig_w, orig_h;   /* original window size (for resize) */
 } MouseState;
 
+#define MAX_OVERLAYS       16
+
+/* Unmanaged overlay window (widgets, notifications): tracked just enough
+   to preserve its layer across workspace switches.  topmost=1 (above/
+   sticky widgets) is re-raised; otherwise re-lowered like pinned docks. */
+typedef struct {
+    Window window;
+    int topmost : 1;
+} Overlay;
+
+extern Overlay overlays[MAX_OVERLAYS];
+extern int noverlays;
+
 typedef struct Monitor Monitor;
 struct Monitor {
     int id;
@@ -274,6 +287,7 @@ int window_exists(Window w);
 void update_camera_ws(Workspace *ws);
 void monitor_usable_area(Monitor *mon, int *w, int *h, int *x, int *y);
 void raise_above_windows(Workspace *ws);
+void restack_visible(void);
 void tile_horizontal_ws(Workspace *ws);
 void retile_ws(Workspace *ws);
 void retile_deferred(void);

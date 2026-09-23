@@ -418,6 +418,47 @@ raise_above_windows(Workspace *ws)
     }
 }
 
+/* Enforce layer order across ALL visible windows.  Mapping stacks on top,
+   so any path that maps windows (workspace show, monocle unhide, moves)
+   must end here: below-layer sinks, current-ws layers reorder, sticky
+   and above from any workspace go back on top, then tracked unmanaged
+   overlays (topmost re-raised, pinned re-lowered). */
+void
+restack_visible(void)
+{
+    Workspace *cur = curws();
+    int j, i;
+
+    for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+        if (&spaces[j] == cur) continue;
+        for (i = 0; i < spaces[j].nwin; i++) {
+            if (spaces[j].wins[i].is_below)
+                XLowerWindow(dpy, spaces[j].wins[i].window);
+        }
+    }
+
+    raise_above_windows(cur);
+
+    /* Sticky + above survivors from other workspaces were never unmapped,
+       so freshly mapped windows covered them — put them back on top. */
+    for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+        if (&spaces[j] == cur) continue;
+        if (j == SCRATCHPAD_IDX) continue;
+        for (i = 0; i < spaces[j].nwin; i++) {
+            if (spaces[j].wins[i].is_above || spaces[j].wins[i].is_sticky)
+                XRaiseWindow(dpy, spaces[j].wins[i].window);
+        }
+    }
+
+    /* Unmanaged overlays: notifications back on top, pinned back down. */
+    for (i = 0; i < noverlays; i++) {
+        if (overlays[i].topmost)
+            XRaiseWindow(dpy, overlays[i].window);
+        else
+            XLowerWindow(dpy, overlays[i].window);
+    }
+}
+
 void
 retile_ws(Workspace *ws)
 {
@@ -452,13 +493,16 @@ flush_retile(void)
 static void
 dwindle_unhide_all(Workspace *ws)
 {
-    int i;
+    int i, unhid = 0;
     for (i = 0; i < ws->nwin; i++) {
         if (ws->wins[i].monocle_hidden) {
             ws->wins[i].monocle_hidden = 0;
             XMapWindow(dpy, ws->wins[i].window);
+            unhid = 1;
         }
     }
+    if (unhid)
+        restack_visible();
 }
 
 void

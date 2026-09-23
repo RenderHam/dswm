@@ -30,6 +30,8 @@ Workspace spaces[NUM_WORKSPACES + 1];
 MouseState mouse;
 int scratch_visible;
 Window scratch_saved_focus;
+Overlay overlays[MAX_OVERLAYS];
+int noverlays;
 
 /* cached atoms */
 Atom atom_wm_delete;
