@@ -616,7 +616,8 @@ manage_window(Window w)
         ManagedWindow tmp;
         memset(&tmp, 0, sizeof(tmp));
         read_net_wm_state(&tmp, w);
-        overlay_add(w, tmp.is_above || tmp.is_sticky);
+        overlay_add(w, layer_is_top(tmp.is_above, tmp.is_sticky,
+                                    tmp.is_below));
         XMapWindow(dpy, w);
         /* Desktop/dock widgets live underneath everything managed */
         if (win_type == WIN_PINNED)
@@ -856,9 +857,10 @@ focus_cycle(int delta)
     if (steps >= ws->nwin || ws->nwin == 0) return;
 
     refocus(ws, &ws->wins[i]);
-    /* Keyboard focus is explicit: raise floating/fullscreen targets */
+    /* Keyboard focus is explicit: raise floating/fullscreen targets.
+       Below-layer windows are never auto-raised. */
     if ((ws->wins[i].is_floating || ws->wins[i].is_fullscreen)
-        && window_exists(ws->wins[i].window))
+        && !ws->wins[i].is_below && window_exists(ws->wins[i].window))
         XRaiseWindow(dpy, ws->wins[i].window);
 
     if (mon->horizontal_mode)
@@ -932,8 +934,10 @@ handle_client_message(XClientMessageEvent *e)
             switch_workspace((void *)(long)mw->workspace);
         if (ws->focused != mw->window)
             refocus(ws, mw);
-        /* Pager/taskbar focus requests are explicit: raise floaters */
-        if ((mw->is_floating || mw->is_fullscreen) && window_exists(mw->window))
+        /* Pager/taskbar focus requests are explicit: raise floaters.
+           Below-layer windows are never auto-raised. */
+        if ((mw->is_floating || mw->is_fullscreen) && !mw->is_below
+            && window_exists(mw->window))
             XRaiseWindow(dpy, mw->window);
         return;
     }
@@ -1618,7 +1622,8 @@ handle_button_press(XButtonEvent *e)
             if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
                 && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
                 if (ws->focused != mw->window) refocus(ws, mw);
-                XRaiseWindow(dpy, mw->window);
+                if (!mw->is_below)
+                    XRaiseWindow(dpy, mw->window);
                 grab_mouse(mw, 1, e);
                 return;
             }
@@ -1634,7 +1639,8 @@ handle_button_press(XButtonEvent *e)
         if (e->x_root >= mw->x && e->x_root < mw->x + mw->width
             && e->y_root >= mw->y && e->y_root < mw->y + mw->height) {
             if (ws->focused != mw->window) refocus(ws, mw);
-            XRaiseWindow(dpy, mw->window);
+            if (!mw->is_below)
+                XRaiseWindow(dpy, mw->window);
             grab_mouse(mw, 0, e);
             return;
         }

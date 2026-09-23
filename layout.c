@@ -396,8 +396,16 @@ fit_window(void)
    collapse into a single retile.  retile_deferred() sets a flag;
    flush_retile() (called once per event) performs the actual layout. */
 
+/* Top layer predicate: above always wins; sticky counts only when the
+   window is not also below (sticky is visibility, not stacking). */
+int
+layer_is_top(int above, int sticky, int below)
+{
+    return above || (sticky && !below);
+}
+
 /* Maintain layer order: below-layer windows sink underneath tiled,
-   regular floating goes above tiled, above/sticky on top of those. */
+   regular floating goes above tiled, top layer on top of those. */
 void
 raise_above_windows(Workspace *ws)
 {
@@ -413,7 +421,8 @@ raise_above_windows(Workspace *ws)
             XRaiseWindow(dpy, ws->wins[i].window);
     }
     for (i = 0; i < ws->nwin; i++) {
-        if (ws->wins[i].is_above || ws->wins[i].is_sticky)
+        if (layer_is_top(ws->wins[i].is_above, ws->wins[i].is_sticky,
+                         ws->wins[i].is_below))
             XRaiseWindow(dpy, ws->wins[i].window);
     }
 }
@@ -439,13 +448,15 @@ restack_visible(void)
 
     raise_above_windows(cur);
 
-    /* Sticky + above survivors from other workspaces were never unmapped,
+    /* Top-layer survivors from other workspaces were never unmapped,
        so freshly mapped windows covered them — put them back on top. */
     for (j = 0; j < NUM_WORKSPACES + 1; j++) {
         if (&spaces[j] == cur) continue;
         if (j == SCRATCHPAD_IDX) continue;
         for (i = 0; i < spaces[j].nwin; i++) {
-            if (spaces[j].wins[i].is_above || spaces[j].wins[i].is_sticky)
+            if (layer_is_top(spaces[j].wins[i].is_above,
+                             spaces[j].wins[i].is_sticky,
+                             spaces[j].wins[i].is_below))
                 XRaiseWindow(dpy, spaces[j].wins[i].window);
         }
     }
@@ -870,9 +881,10 @@ dwindle_focus_cycle(Workspace *ws, int delta)
         if (leaf) ws->dwindle_focus = leaf;
     }
     refocus(ws, cands[ci]);
-    /* Keyboard focus is explicit: raise floating/fullscreen targets */
+    /* Keyboard focus is explicit: raise floating/fullscreen targets.
+       Below-layer windows are never auto-raised. */
     if ((cands[ci]->is_floating || cands[ci]->is_fullscreen)
-        && window_exists(cands[ci]->window))
+        && !cands[ci]->is_below && window_exists(cands[ci]->window))
         XRaiseWindow(dpy, cands[ci]->window);
 }
 

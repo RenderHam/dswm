@@ -286,6 +286,7 @@ int window_exists(Window w);
 
 void update_camera_ws(Workspace *ws);
 void monitor_usable_area(Monitor *mon, int *w, int *h, int *x, int *y);
+int layer_is_top(int above, int sticky, int below);
 void raise_above_windows(Workspace *ws);
 void restack_visible(void);
 void tile_horizontal_ws(Workspace *ws);

@@ -105,6 +105,12 @@ at map time and is noticed later.
 - Known tradeoff: overlay-topmost notifications raise above managed
   fullscreen (OSD semantics); stale overlay entries (hidden without
   destroy) make `XRaiseWindow` a harmless no-op until pruned.
+- Layer precedence fix: `layer_is_top(above, sticky, below)` =
+  `above || (sticky && !below)` — sticky no longer outranks below
+  (Kyute desktop preset is sticky+below and must stay down). Applied in
+  `raise_above_windows`, `restack_visible`, overlay tracking; below-layer
+  windows are never auto-raised (keyboard cycle, dwindle cycle, Mod4+click,
+  pager focus requests). Above+below keeps above-wins.
 
 ## Log
 
