@@ -26,6 +26,7 @@ window_exists(Window w)
 
 static void write_net_wm_state(ManagedWindow *mw);
 static void scratch_raise_all(void);
+static void hide_tracked(Window w);
 
 static int
 wins_ensure_cap(Workspace *ws)
@@ -106,12 +107,13 @@ overlay_remove(Window w)
     }
 }
 
-/* Whether a window can receive keyboard-cycle focus.  Fullscreen and
-   monocle-hidden windows are skipped (they're not visible/interactive). */
+/* Whether a window can receive keyboard-cycle focus.  Monocle-hidden
+   windows are skipped (not visible); fullscreen windows are reachable
+   like any other visible window (bspwm cycles all nodes). */
 int
 focus_candidate(ManagedWindow *mw)
 {
-    return !mw->is_not_focusable && !mw->is_fullscreen && !mw->monocle_hidden;
+    return !mw->is_not_focusable && !mw->monocle_hidden;
 }
 
 /* Refocus the workspace after a window at 'removed' index was memmoved out.
@@ -212,17 +214,16 @@ void
 focus_monitor(void *arg)
 {
     int mon_idx = (int)(long)arg;
-    int old_ws;
+    ManagedWindow *cur;
     if (mon_idx < 0 || mon_idx >= nmons) return;
 
-    old_ws = cur_ws;
-    if (mons[mon_idx].current_workspace == old_ws) return;
-
-    show_workspace(old_ws, 0);
+    /* Every monitor keeps showing its own workspace — moving input focus
+       across monitors maps/unmaps nothing, it only retargets cur_ws. */
     cur_ws = mons[mon_idx].current_workspace;
-    show_workspace(cur_ws, 1);
 
-    retile_ws(curws());
+    cur = focused_mw(curws());
+    if (cur)
+        refocus(curws(), cur);
 
     update_ewmh_current_desktop();
 }
@@ -256,7 +257,7 @@ move_horizontal(int forward)
         refocus(ws, ws->tiled[idx - 1]);
     }
 
-    update_camera_ws(curws());
+    update_camera_ws(curws(), mon);
 }
 
 /* ---- swap ---- */
@@ -307,6 +308,11 @@ show_workspace(int idx, int visible)
     Workspace *ws = &spaces[idx];
     int i;
 
+    /* Our own hide/show traffic must not reach the unmanage path:
+       only genuine client withdraws may unmanage a window. */
+    if (!visible)
+        XSelectInput(dpy, root, ROOT_EVENT_MASK & ~SubstructureNotifyMask);
+
     for (i = 0; i < ws->nwin; i++) {
         /* Sticky windows are never unmapped — they stay visible on all
            workspaces.  When showing a workspace, always map them. */
@@ -321,7 +327,10 @@ show_workspace(int idx, int visible)
             XUnmapWindow(dpy, ws->wins[i].window);
     }
 
-    if (!visible) return;
+    if (!visible) {
+        XSelectInput(dpy, root, ROOT_EVENT_MASK);
+        return;
+    }
 
     /* Freshly mapped windows stacked on top: restore layer order for
        sticky survivors, overlays and current-ws layers, then keep the
@@ -335,14 +344,47 @@ void
 switch_workspace(void *arg)
 {
     int idx = (int)(long)arg;
+    Monitor *mon = curmon();
+    ManagedWindow *cur;
+    int old, i;
     if (idx < 0 || idx >= NUM_WORKSPACES) return;
-    if (idx == cur_ws) return;
 
-    show_workspace(cur_ws, 0);
+    old = mon->current_workspace;
+    if (idx == old) {
+        /* Already shown here — just retarget input focus if needed */
+        if (cur_ws != idx) {
+            cur_ws = idx;
+            cur = focused_mw(curws());
+            if (cur)
+                refocus(curws(), cur);
+            update_ewmh_current_desktop();
+        }
+        return;
+    }
+
+    /* If the target is shown on another monitor, swap so every monitor
+       keeps showing exactly one workspace. */
+    for (i = 0; i < nmons; i++) {
+        if (&mons[i] != mon && mons[i].current_workspace == idx) {
+            mons[i].current_workspace = old;
+            break;
+        }
+    }
+    mon->current_workspace = idx;
     cur_ws = idx;
-    show_workspace(cur_ws, 1);
 
-    retile_ws(curws());
+    /* Hide the old workspace only if no monitor shows it anymore */
+    if (!ws_visible(old))
+        show_workspace(old, 0);
+    /* Map the target (no-op if it was already visible via swap) */
+    show_workspace(idx, 1);
+
+    retile_ws(&spaces[old]);
+    retile_ws(&spaces[idx]);
+
+    cur = focused_mw(curws());
+    if (cur)
+        refocus(curws(), cur);
 
     update_ewmh_current_desktop();
 }
@@ -384,12 +426,27 @@ move_window_to_workspace(Window w, int idx)
     if (!wins_ensure_cap(target)) err(1, "wins_ensure_cap");
     win.workspace = idx;
 
-    /* Clamp floating windows to virtual screen bounds */
-    if (win.is_floating) {
-        if (win.x < 0) win.x = 0;
-        if (win.y < 0) win.y = 0;
-        if (win.x + win.width > scrw) win.x = scrw - win.width;
-        if (win.y + win.height > scrh) win.y = scrh - win.height;
+    /* Track the destination monitor; clamp floating windows to it
+       (virtual scrw/scrh straddles mixed-size monitors).  Fullscreen
+       windows are refit to the destination monitor (F3). */
+    {
+        Monitor *tmon = mon_for_ws(idx);
+        win.monitor = tmon->id;
+        if (win.is_fullscreen) {
+            win.x = tmon->x;
+            win.y = tmon->y;
+            win.width = tmon->width;
+            win.height = tmon->height;
+            XMoveResizeWindow(dpy, w, tmon->x, tmon->y,
+                              tmon->width, tmon->height);
+        } else if (win.is_floating) {
+            if (win.x < tmon->x) win.x = tmon->x;
+            if (win.y < tmon->y) win.y = tmon->y;
+            if (win.x + win.width > tmon->x + tmon->width)
+                win.x = tmon->x + tmon->width - win.width;
+            if (win.y + win.height > tmon->y + tmon->height)
+                win.y = tmon->y + tmon->height - win.height;
+        }
     }
 
     target->wins[target->nwin++] = win;
@@ -406,11 +463,11 @@ move_window_to_workspace(Window w, int idx)
                         PropModeReplace, (unsigned char *)&desktop, 1);
     }
 
-    if (idx == cur_ws) {
+    if (ws_visible(idx)) {
         XMapWindow(dpy, w);
     } else if (!win.is_sticky) {
         /* Sticky windows stay mapped on all workspaces */
-        XUnmapWindow(dpy, w);
+        hide_tracked(w);
     }
 
     /* Only refocus visible workspaces — never focus a hidden window */
@@ -743,7 +800,7 @@ manage_window(Window w)
     if (mw.is_fullscreen)
         XRaiseWindow(dpy, w);
 
-    if (mw.workspace == cur_ws || ws == &spaces[SCRATCHPAD_IDX]) {
+    if (ws_visible(mw.workspace) || ws == &spaces[SCRATCHPAD_IDX]) {
         Atom actual;
         int fmt;
         unsigned long n, remain;
@@ -756,10 +813,10 @@ manage_window(Window w)
         }
     }
 
-    if (mw.workspace == cur_ws || ws == &spaces[SCRATCHPAD_IDX])
+    if (ws_visible(mw.workspace) || ws == &spaces[SCRATCHPAD_IDX])
         XMapWindow(dpy, w);
 
-    if (mw.workspace == cur_ws || ws == &spaces[SCRATCHPAD_IDX]) {
+    if (ws_visible(mw.workspace) || ws == &spaces[SCRATCHPAD_IDX]) {
         retile_ws(ws);
         /* New window mapped on top: restore survivor + overlay layers */
         restack_visible();
@@ -778,18 +835,19 @@ manage_window(Window w)
     update_ewmh_client_list();
 }
 
-/* Unmanage a window (destroyed or unmapped).  When force is true the
-   window is removed from every workspace (used on DestroyNotify);
-   otherwise only the current workspace is searched (UnmapNotify).
-   After removal, refocus the adjacent tiled window if needed. */
+/* Unmanage a window (destroyed or unmapped).  Every workspace is searched:
+   with one visible workspace per monitor, withdraws arrive for any visible
+   workspace, not just the focused one.  Our own hide/show traffic is
+   masked off in show_workspace, so only genuine client withdraws land
+   here.  Focus is only repaired on the focused workspace — never focus
+   a window the user can't see. */
 void
 unmanage_window(Window w, int force)
 {
     int i, j;
-    int lo = force ? 0 : cur_ws;
-    int hi = force ? NUM_WORKSPACES + 1 : cur_ws + 1;
+    (void)force;
 
-    for (j = lo; j < hi; j++) {
+    for (j = 0; j < NUM_WORKSPACES + 1; j++) {
         Workspace *ws = &spaces[j];
         int removed = -1;
 
@@ -864,7 +922,7 @@ focus_cycle(int delta)
         XRaiseWindow(dpy, ws->wins[i].window);
 
     if (mon->horizontal_mode)
-        update_camera_ws(curws());
+        update_camera_ws(curws(), mon);
 }
 
 /* ---- client messages ---- */
@@ -1024,7 +1082,10 @@ toggle_fullscreen(void)
     }
 
     if (w->is_fullscreen) {
-        Monitor *mon = curmon();
+        /* Fullscreen covers the window's own monitor (bspwm binds
+           fullscreen geometry to the node monitor, not the cursor's). */
+        Monitor *mon = mon_for_mw(w);
+        w->monitor = mon->id;
         w->pre_fs_floating = w->is_floating;
 
         if (w->is_floating) {
@@ -1239,15 +1300,18 @@ scratch_raise_all(void)
     }
 }
 
-/* Scratchpad overlay unmap: hide every window in the scratchpad. */
+/* Scratchpad overlay unmap: hide every window in the scratchpad.
+   Masked like show_workspace — these windows stay managed. */
 static void
 scratch_unmap_all(void)
 {
     Workspace *ws = &spaces[SCRATCHPAD_IDX];
     int i;
 
+    XSelectInput(dpy, root, ROOT_EVENT_MASK & ~SubstructureNotifyMask);
     for (i = 0; i < ws->nwin; i++)
         XUnmapWindow(dpy, ws->wins[i].window);
+    XSelectInput(dpy, root, ROOT_EVENT_MASK);
 }
 
 /* Move the focused window into the scratchpad workspace.
@@ -1303,7 +1367,7 @@ move_to_scratchpad(void)
     } else {
         /* Hidden until next toggle — but sticky windows stay mapped */
         if (!win.is_sticky)
-            XUnmapWindow(dpy, win.window);
+            hide_tracked(win.window);
     }
 
     /* Refocus source workspace */
@@ -1396,6 +1460,16 @@ spawn(void *arg)
 
 /* ---- X event handlers ---- */
 
+/* Unmap a still-managed window without tripping the unmanage path.
+   Only genuine client withdraws may unmanage a window. */
+static void
+hide_tracked(Window w)
+{
+    XSelectInput(dpy, root, ROOT_EVENT_MASK & ~SubstructureNotifyMask);
+    XUnmapWindow(dpy, w);
+    XSelectInput(dpy, root, ROOT_EVENT_MASK);
+}
+
 /* Clamp dimensions to the client's WM_NORMAL_HINTS min/max size. */
 static void
 apply_size_hints(ManagedWindow *mw, int *w, int *h)
@@ -1454,6 +1528,27 @@ void
 handle_configure_request(XConfigureRequestEvent *e)
 {
     ManagedWindow *mw = find_mw_any(e->window);
+
+    if (mw && mw->is_fullscreen) {
+        /* Fullscreen: reject client geometry, answer with the window's
+           monitor rect so the client knows its real geometry (bspwm:
+           fullscreen configure gets the monitor rectangle). */
+        Monitor *mon = mon_for_mw(mw);
+        XConfigureEvent ce;
+        memset(&ce, 0, sizeof(ce));
+        ce.type = ConfigureNotify;
+        ce.event = e->window;
+        ce.window = e->window;
+        ce.above = None;
+        ce.x = mon->x;
+        ce.y = mon->y;
+        ce.width = mon->width;
+        ce.height = mon->height;
+        ce.border_width = 0;
+        ce.override_redirect = False;
+        XSendEvent(dpy, e->window, False, StructureNotifyMask, (XEvent *)&ce);
+        return;
+    }
 
     if (mw && !mw->is_floating && !mw->is_fullscreen) {
         /* Tiled: honor geometry changes but block stacking.
@@ -1650,7 +1745,13 @@ handle_button_press(XButtonEvent *e)
 void
 handle_button_release(XButtonEvent *e)
 {
+    ManagedWindow *mw;
     (void)e;
+
+    /* The window may have crossed monitors mid-drag: re-resolve home */
+    mw = find_mw_any(mouse.win);
+    if (mw)
+        mw->monitor = mon_for_mw(mw)->id;
 
     mouse.active = 0;
     mouse.resizing = 0;
@@ -1797,11 +1898,11 @@ handle_property_notify(XPropertyEvent *e)
     }
 
     /* Un-stickied window belongs to its home workspace only.  It is one
-       window, so unmap only when the home workspace isn't visible —
-       otherwise the UnmapNotify would unmanage it out from under us. */
+       window, so unmap only when the home workspace isn't visible.
+       Masked so the synthetic UnmapNotify can't unmanage it. */
     if (!mw->is_sticky && was_sticky) {
         if (mw->workspace != cur_ws)
-            XUnmapWindow(dpy, mw->window);
+            hide_tracked(mw->window);
         retile_deferred();
     }
 

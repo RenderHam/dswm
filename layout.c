@@ -44,6 +44,45 @@ curmon(void)
     return &mons[0];
 }
 
+/* Monitor showing workspace idx.  Falls back to the focused monitor
+   (scratchpad and hidden workspaces have no dedicated monitor). */
+Monitor *
+mon_for_ws(int idx)
+{
+    int i;
+    for (i = 0; i < nmons; i++)
+        if (mons[i].current_workspace == idx)
+            return &mons[i];
+    return curmon();
+}
+
+/* Monitor containing the window's center.  bspwm binds fullscreen (and
+   other monitor-sensitive state) to the window's own monitor rather
+   than whichever monitor owns the focused workspace. */
+Monitor *
+mon_for_mw(ManagedWindow *mw)
+{
+    int i;
+    int cx = mw->x + mw->width / 2;
+    int cy = mw->y + mw->height / 2;
+    for (i = 0; i < nmons; i++)
+        if (cx >= mons[i].x && cx < mons[i].x + mons[i].width &&
+            cy >= mons[i].y && cy < mons[i].y + mons[i].height)
+            return &mons[i];
+    return curmon();
+}
+
+/* Whether any monitor currently shows workspace idx. */
+int
+ws_visible(int idx)
+{
+    int i;
+    for (i = 0; i < nmons; i++)
+        if (mons[i].current_workspace == idx)
+            return 1;
+    return 0;
+}
+
 /* ---- tiled list helpers ---- */
 
 int
@@ -151,16 +190,16 @@ read_window_strut(Monitor *mon, Window w, int wx, int wy, int ww, int wh)
     if (data) XFree(data);
 }
 
-/* Read struts from windows on the current workspace AND from unmanaged
-   root children (docks, bars, desktop widgets).  Struts are reserved
-   screen edges that tiled windows must avoid.  Results are cached in
+/* Read struts from managed windows on visible workspaces (sticky bars
+   live on hidden workspaces but stay mapped) AND from unmanaged root
+   children (docks, bars, desktop widgets).  Struts are reserved screen
+   edges that tiled windows must avoid.  Results are cached in
    mon->strut_* and invalidated via strut_valid on window add/remove
    and on strut property changes. */
 static void
 compute_struts(Monitor *mon)
 {
-    Workspace *ws = curws();
-    int i;
+    int j, i;
 
     if (mon->strut_valid) return;
 
@@ -169,11 +208,18 @@ compute_struts(Monitor *mon)
     mon->strut_left = 0;
     mon->strut_right = 0;
 
-    /* Check managed windows on current workspace */
-    for (i = 0; i < ws->nwin; i++) {
-        read_window_strut(mon, ws->wins[i].window,
-                          ws->wins[i].x, ws->wins[i].y,
-                          ws->wins[i].width, ws->wins[i].height);
+    /* Check managed windows on visible workspaces, plus sticky windows
+       anywhere (they stay mapped on hidden workspaces too) */
+    for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+        Workspace *ws = &spaces[j];
+        int vis = ws_visible(j);
+        for (i = 0; i < ws->nwin; i++) {
+            if (!vis && !ws->wins[i].is_sticky)
+                continue;
+            read_window_strut(mon, ws->wins[i].window,
+                              ws->wins[i].x, ws->wins[i].y,
+                              ws->wins[i].width, ws->wins[i].height);
+        }
     }
 
     /* Also check unmanaged root children (docks, bars, widgets) */
@@ -226,9 +272,8 @@ monitor_usable_area(Monitor *mon, int *usable_w, int *usable_h,
    focused column is visible — either centered or edge-snapped. */
 
 void
-update_camera_ws(Workspace *ws)
+update_camera_ws(Workspace *ws, Monitor *mon)
 {
-    Monitor *mon = curmon();
     int i;
     int usable_w, cam_x = 0, centered = 0, scrolled = 0;
 
@@ -293,9 +338,8 @@ update_camera_ws(Workspace *ws)
 }
 
 void
-tile_horizontal_ws(Workspace *ws)
+tile_horizontal_ws(Workspace *ws, Monitor *mon)
 {
-    Monitor *mon = curmon();
     int i;
     int usable_h, usable_w, x_start, y_start;
     int win_h, col_w, win_w;
@@ -330,7 +374,7 @@ tile_horizontal_ws(Workspace *ws)
         cur_x += col_w;
     }
 
-    update_camera_ws(ws);
+    update_camera_ws(ws, mon);
 }
 
 /* ---- resize ---- */
@@ -358,7 +402,7 @@ resize_window(void *arg)
     if (w->width_factor > MAX_WIDTH_FACTOR) w->width_factor = MAX_WIDTH_FACTOR;
     w->is_fit = 0;
 
-    tile_horizontal_ws(ws);
+    tile_horizontal_ws(ws, mon);
 }
 
 /* Returns 1 if the caller should toggle fullscreen (window was floating
@@ -387,7 +431,7 @@ fit_window(void)
         w->width_factor = w->saved_factor;
         w->is_fit = 0;
     }
-    tile_horizontal_ws(ws);
+    tile_horizontal_ws(ws, mon);
     return 0;
 }
 
@@ -473,13 +517,25 @@ restack_visible(void)
 void
 retile_ws(Workspace *ws)
 {
-    Monitor *mon = curmon();
+    /* Tile on the monitor actually showing this workspace, so a
+       workspace moved between monitors lays out against the right
+       geometry even when it isn't the focused one. */
+    Monitor *mon = mon_for_ws(ws - spaces);
     if (mon->horizontal_mode)
-        tile_horizontal_ws(ws);
+        tile_horizontal_ws(ws, mon);
     else
         dwindle_arrange(ws, mon);
     raise_above_windows(ws);
     update_ewmh_workarea();
+}
+
+/* Retile every workspace currently shown on a monitor. */
+void
+retile_visible(void)
+{
+    int i;
+    for (i = 0; i < nmons; i++)
+        retile_ws(&spaces[mons[i].current_workspace]);
 }
 
 void
@@ -537,7 +593,7 @@ toggle_layout(void)
         dwindle_unhide_all(ws);
         dwindle_cleanup(ws);
         rebuild_tiled(ws);
-        tile_horizontal_ws(ws);
+        tile_horizontal_ws(ws, mon);
     } else {
         /* Entering dwindle: build dwindle tree from all tiled windows */
         rebuild_tiled(ws);

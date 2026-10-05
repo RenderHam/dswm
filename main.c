@@ -6,6 +6,7 @@
 #include <X11/Xutil.h>
 #include <X11/XF86keysym.h>
 #include <X11/extensions/Xinerama.h>
+#include <X11/extensions/Xrandr.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -32,6 +33,9 @@ int scratch_visible;
 Window scratch_saved_focus;
 Overlay overlays[MAX_OVERLAYS];
 int noverlays;
+
+/* RandR event base (0 = extension unavailable) */
+static int randr_base = 0;
 
 /* cached atoms */
 Atom atom_wm_delete;
@@ -418,9 +422,16 @@ init(void)
     }
 
     grab_keys();
-    XSelectInput(dpy, root, SubstructureRedirectMask | SubstructureNotifyMask
-                           | KeyPressMask | ButtonPressMask | ButtonReleaseMask
-                           | PointerMotionMask | PropertyChangeMask);
+    XSelectInput(dpy, root, ROOT_EVENT_MASK);
+
+    /* Monitor hotplug: rebuild the monitor set on RandR screen change */
+    {
+        int err_base = 0;
+        if (XRRQueryExtension(dpy, &randr_base, &err_base))
+            XRRSelectInput(dpy, root, RRScreenChangeNotifyMask);
+        else
+            randr_base = 0;
+    }
 
     signal(SIGCHLD, SIG_IGN);
 
@@ -497,7 +508,36 @@ run(void)
         case MappingNotify:    handle_mapping_notify(&ev.xmapping); break;
         case PropertyNotify:   handle_property_notify(&ev.xproperty); break;
         case ClientMessage:    handle_client_message(&ev.xclient); break;
-        default: continue;
+        default:
+            /* RandR hotplug: outputs changed — rebuild monitors, refit
+               fullscreen windows, relay out every visible workspace */
+            if (randr_base && ev.type == randr_base + RRScreenChangeNotify) {
+                int j, i;
+                XRRUpdateConfiguration(&ev);
+                monitors_init();
+                scrw = DisplayWidth(dpy, DefaultScreen(dpy));
+                scrh = DisplayHeight(dpy, DefaultScreen(dpy));
+                for (j = 0; j < NUM_WORKSPACES + 1; j++) {
+                    for (i = 0; i < spaces[j].nwin; i++) {
+                        ManagedWindow *mw = &spaces[j].wins[i];
+                        if (mw->is_fullscreen) {
+                            Monitor *mon = mon_for_mw(mw);
+                            mw->monitor = mon->id;
+                            mw->x = mon->x;
+                            mw->y = mon->y;
+                            mw->width = mon->width;
+                            mw->height = mon->height;
+                            XMoveResizeWindow(dpy, mw->window, mon->x, mon->y,
+                                              mon->width, mon->height);
+                        }
+                    }
+                }
+                retile_visible();
+                update_ewmh_current_desktop();
+                update_ewmh_client_list();
+                update_ewmh_workarea();
+            }
+            continue;
         }
         flush_retile();
     }

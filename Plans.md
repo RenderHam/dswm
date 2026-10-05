@@ -112,6 +112,27 @@ at map time and is noticed later.
   windows are never auto-raised (keyboard cycle, dwindle cycle, Mod4+click,
   pager focus requests). Above+below keeps above-wins.
 
+## Fullscreen + monitor compat (bspwm reference)
+
+- [x] F1. Fullscreen geometry follows the window's monitor (`mon_for_mw`),
+  not `curmon()`.
+- [x] F2. Block client geometry changes on fullscreen windows; answer with
+  synthetic `ConfigureNotify` carrying the monitor rect (bspwm parity).
+- [x] F3. Refit fullscreen geometry on workspace move + monitor reinit.
+- [x] F4. Keyboard focus may land on fullscreen windows (drop exclusion).
+- [x] M1. Keep `mw->monitor` current (drag end, workspace move, manage).
+- [x] M2. Workspace-move clamp targets the destination monitor, not `scrw/scrh`.
+- [x] M3. Strut scan covers sticky windows on all workspaces.
+- [x] M4. RandR hotplug (xrandr dep, screen-change → reinit + refit + retile).
+- [x] M5. Multi-view multi-monitor: one visible workspace per monitor.
+  `switch_workspace` reassigns (swapping if target shown elsewhere);
+  `focus_monitor` moves input focus only, no show/hide; `retile_ws`
+  resolves its monitor via `mon_for_ws`; tiling threaded on `(ws, mon)`;
+  `show_workspace` suppresses synthetic `UnmapNotify`; unmanage searches
+  all workspaces (refocus only on `curws`). Deliberate synthetic unmaps
+  (`hide_tracked`) in move/scratchpad/un-stick paths. Hover focuses the
+  focused workspace only (cross-monitor hover focus left out, as before).
+
 ## Log
 
 - 2026-09-23: Plan written. Starting Phase A.
@@ -123,3 +144,4 @@ at map time and is noticed later.
 - 2026-09-23: EWMH completeness (workarea + frame extents). Zero warnings. Not committed per user request.
 - 2026-09-24: Widget respect W1-W4 (geometry, Motif borders, pinned lower, strut partial). Zero warnings. Not committed per user request.
 - 2026-09-24: Layer reset L1-L4 (global restack, overlay tracking, un-sticky fix). Zero warnings. Not committed per user request.
+- 2026-09-24: Fullscreen + monitor F1-F4, M1-M5 (incl. multi-view). Zero warnings. Not committed per user request.

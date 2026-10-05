@@ -267,9 +267,22 @@ extern int center_focused;
 
 /* ---- layout.c prototypes ---- */
 
+/* Root event mask: everything dswm listens for on the root window.
+   show_workspace temporarily drops SubstructureNotifyMask so its own
+   hide/show traffic never reaches the unmanage path. */
+#define ROOT_EVENT_MASK (SubstructureRedirectMask | SubstructureNotifyMask \
+                         | KeyPressMask | ButtonPressMask | ButtonReleaseMask \
+                         | PointerMotionMask | PropertyChangeMask)
+
 Workspace *curws(void);
 Workspace *active_ws(void);
 Monitor   *curmon(void);
+/* Monitor showing workspace idx (fallback: focused monitor). */
+Monitor   *mon_for_ws(int idx);
+/* Monitor containing the window's center (fallback: focused monitor). */
+Monitor   *mon_for_mw(ManagedWindow *mw);
+/* Whether any monitor currently shows workspace idx. */
+int ws_visible(int idx);
 
 int  tiled_ensure_cap(Workspace *ws);
 void tiled_add(Workspace *ws, ManagedWindow *mw);
@@ -284,13 +297,15 @@ ManagedWindow *focused_mw(Workspace *ws);
 int focus_candidate(ManagedWindow *mw);
 int window_exists(Window w);
 
-void update_camera_ws(Workspace *ws);
+void update_camera_ws(Workspace *ws, Monitor *mon);
 void monitor_usable_area(Monitor *mon, int *w, int *h, int *x, int *y);
 int layer_is_top(int above, int sticky, int below);
 void raise_above_windows(Workspace *ws);
 void restack_visible(void);
-void tile_horizontal_ws(Workspace *ws);
+void tile_horizontal_ws(Workspace *ws, Monitor *mon);
 void retile_ws(Workspace *ws);
+/* Retile every workspace currently shown on a monitor. */
+void retile_visible(void);
 void retile_deferred(void);
 void flush_retile(void);
 void toggle_center_focus(void);
